@@ -17,3 +17,14 @@ The app defaults to the latest significant wet-weather event found by combining 
 ## Data notes
 
 Asset coordinates are approximate and should be replaced with surveyed/GIS coordinates when available. Force-main and sewer geometries are schematic until shapefiles are provided.
+
+## Wet Weather Analytics
+
+The `Wet Weather Analytics` page adds:
+
+- Pump starts, stops, completed cycles, short-cycle screening and median cycle duration by station and pump.
+- Current seven-day forecast precipitation versus recent actual precipitation.
+- Screening-level estimated wet-weather-derived flow using a 2026 dry-weather hour-of-week baseline.
+- Event excess-volume, peak excess-flow, rain-to-response lag and MG-per-inch metrics.
+
+D Street is treated as a pump station throughout the asset registry. Its unknown design capacity remains blank rather than changing its asset class.

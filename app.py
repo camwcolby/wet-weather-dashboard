@@ -35,6 +35,7 @@ event_row = ranked[ranked.event_date.dt.normalize()==selected_day.normalize()]
 response_day = pd.Timestamp(event_row.iloc[0].response_date) if not event_row.empty and pd.notna(event_row.iloc[0].response_date) else selected_day
 as_of=response_day+pd.Timedelta(hours=23,minutes=59)
 render_header(f"Historical Playback · Rain {selected_day:%b %d} → Response {response_day:%b %d, %Y}")
+st.page_link("pages/2_Wet_Weather_Analytics.py", label="Open Wet Weather Analytics", icon="🌧️")
 
 row=ranked[ranked.event_date.dt.normalize()==selected_day.normalize()]
 row=row.iloc[0] if not row.empty else pd.Series(dtype=float)
@@ -44,10 +45,10 @@ max_level=snap.level_in.max() if not snap.empty else np.nan
 running=int((snap.get("pump1_status",0).fillna(0)+snap.get("pump2_status",0).fillna(0)>0).sum()) if not snap.empty else 0
 severity="ALARM" if storm_score>=.8 else "ELEVATED" if storm_score>=.55 else "WATCH" if storm_score>=.3 else "NORMAL"
 sev_color={"NORMAL":GREEN,"WATCH":LIME,"ELEVATED":AMBER,"ALARM":RED}[severity]
-st.markdown(f'<div class="status-strip" style="border-left-color:{sev_color}"><b style="color:{NAVY}">{severity} WET WEATHER STATUS</b> &nbsp; Storm response score {fmt(storm_score*100,0,"%")} · {fmt(rain_val,2," in")} rainfall · plant response peak +{fmt(response_lag,0," hr")} · {running}/7 sanitary stations operating at playback time</div>',unsafe_allow_html=True)
+st.markdown(f'<div class="status-strip" style="border-left-color:{sev_color}"><b style="color:{NAVY}">{severity} WET WEATHER STATUS</b> &nbsp; Storm response score {fmt(storm_score*100,0,"%")} · {fmt(rain_val,2," in")} rainfall · plant response peak +{fmt(response_lag,0," hr")} · {running}/7 telemetry stations operating at playback time</div>',unsafe_allow_html=True)
 
 kpis=st.columns(6)
-items=[("Rainfall trigger",fmt(rain_val,2,' in'),"Event-day total"),("Peak plant influent",fmt(plant_flow,2,' MGD'),"Trigger day + next 24 hr"),("Highest wet well",fmt(max_level,1,' in'),"Across stations"),("Stations running",f"{running} / 7","At playback time"),("System runtime",fmt(row.get('total_runtime_48h',np.nan),1,' hr'),"Daily combined"),("Storm score",fmt(storm_score*100,0,'%'),"Rain + hydraulic response")]
+items=[("Rainfall trigger",fmt(rain_val,2,' in'),"Event-day total"),("Peak plant influent",fmt(plant_flow,2,' MGD'),"Trigger day + next 24 hr"),("Highest wet well",fmt(max_level,1,' in'),"Across stations"),("Stations running",f"{running} / 7","Telemetry reporting"),("System runtime",fmt(row.get('total_runtime_48h',np.nan),1,' hr'),"Daily combined"),("Storm score",fmt(storm_score*100,0,'%'),"Rain + hydraulic response")]
 for c,(lab,val,sub) in zip(kpis,items): c.markdown(f'<div class="kpi"><div class="kpi-label">{lab}</div><div class="kpi-value">{val}</div><div class="kpi-sub">{sub}</div></div>',unsafe_allow_html=True)
 
 left,right=st.columns([2.25,1],gap="medium")
@@ -60,11 +61,10 @@ with left:
     assets["utilization"]=(assets.level_in/84).clip(0,1.2)
     assets["status"]=assets.utilization.apply(status_from_utilization)
     assets.loc[assets.asset_type=="Treatment Plant","status"]="Plant"
-    assets.loc[assets.asset_type=="Unclassified Pump Station","status"]="Unclassified"
-    colors={"Normal":GREEN,"Watch":LIME,"Warning":AMBER,"Alarm":RED,"No Data":"#98A5B3","Plant":NAVY,"Unclassified":BLUE}
+    colors={"Normal":GREEN,"Watch":LIME,"Warning":AMBER,"Alarm":RED,"No Data":"#98A5B3","Plant":NAVY}
     assets["marker_color"]=assets.status.map(colors)
     assets["hover"]="<b>"+assets.display_name+"</b><br>"+assets.address+"<br>Flow: "+assets.flow_gpm.fillna(0).round(0).astype(int).astype(str)+" gpm<br>Wet well: "+assets.level_in.round(1).astype(str)+" in<br>Status: "+assets.status
-    fig=px.scatter_map(assets,lat="lat",lon="lon",color="status",color_discrete_map=colors,size=assets.asset_type.map({"Treatment Plant":26,"Unclassified Pump Station":18,"Sanitary Pump Station":16}),hover_name="display_name",hover_data={"address":True,"flow_gpm":':.0f',"level_in":':.1f',"lat":False,"lon":False,"status":False},zoom=11.4,height=570)
+    fig=px.scatter_map(assets,lat="lat",lon="lon",color="status",color_discrete_map=colors,size=assets.asset_type.map({"Treatment Plant":26,"Pump Station":16}).fillna(16),hover_name="display_name",hover_data={"address":True,"flow_gpm":':.0f',"level_in":':.1f',"lat":False,"lon":False,"status":False},zoom=11.4,height=570)
     fig.update_layout(map_style="open-street-map",margin=dict(l=0,r=0,t=0,b=0),legend=dict(orientation="h",y=1.01,x=.01,bgcolor="rgba(255,255,255,.8)"),clickmode="event+select")
     event=st.plotly_chart(fig,use_container_width=True,on_select="rerun",selection_mode="points",key="system_map")
     selected_asset=st.session_state.get("selected_asset","PS 3")
@@ -84,7 +84,7 @@ with right:
     st.page_link("pages/1_Pump_Station_Detail.py",label="Open dedicated asset page →",icon="🔎",use_container_width=True)
     st.markdown("#### What needs attention")
     alerts=[]
-    for _,x in assets[assets.asset_type=="Sanitary Pump Station"].sort_values("utilization",ascending=False).head(4).iterrows():
+    for _,x in assets[assets.asset_type=="Pump Station"].sort_values("utilization",ascending=False).head(4).iterrows():
         alerts.append(f"**{x.asset_id}** · {x.status} · {fmt(x.level_in,1,' in')} wet well")
     st.info("\n\n".join(alerts) if alerts else "No station data available")
 
