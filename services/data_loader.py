@@ -184,12 +184,45 @@ def load_station_runtimes() -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True).dropna(subset=["date"]).sort_values(["date", "asset_id"]).reset_index(drop=True)
 
 
-def latest_snapshot(collection: pd.DataFrame, as_of: pd.Timestamp) -> pd.DataFrame:
-    subset = collection[collection.timestamp <= as_of]
+def latest_snapshot(
+    collection: pd.DataFrame,
+    as_of: pd.Timestamp,
+    maximum_age_hours: float = 2.0,
+) -> pd.DataFrame:
+    """Return each station's latest telemetry at or before the playback time.
+
+    Values older than maximum_age_hours are retained for identification but
+    marked stale and operational measurements are cleared.
+    """
+    subset = collection.loc[collection["timestamp"] <= as_of].copy()
+
     if subset.empty:
         return pd.DataFrame()
+
     idx = subset.groupby("asset_id")["timestamp"].idxmax()
-    return subset.loc[idx].copy()
+    snapshot = subset.loc[idx].copy()
+
+    snapshot["data_age_hr"] = (
+        as_of - snapshot["timestamp"]
+    ).dt.total_seconds() / 3600
+
+    snapshot["data_is_stale"] = (
+        snapshot["data_age_hr"] > maximum_age_hours
+    )
+
+    measurement_columns = [
+        "flow_gpm",
+        "level_in",
+        "pump1_status",
+        "pump2_status",
+        "interceptor_level",
+    ]
+
+    for column in measurement_columns:
+        if column in snapshot.columns:
+            snapshot.loc[snapshot["data_is_stale"], column] = np.nan
+
+    return snapshot.reset_index(drop=True)
 
 
 @cache_data(show_spinner=False)
