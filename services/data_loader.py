@@ -224,6 +224,85 @@ def latest_snapshot(
 
     return snapshot.reset_index(drop=True)
 
+...
+def latest_snapshot(...):
+    ...
+    return snapshot
+
+
+# ---------------------------------------------
+# NEW FUNCTION
+# ---------------------------------------------
+def station_flow_snapshot(
+    collection: pd.DataFrame,
+    asset_id: str,
+    as_of: pd.Timestamp,
+    window_minutes: int = 5,
+) -> dict:
+
+    station = collection.loc[
+        collection["asset_id"].eq(asset_id)
+        & collection["timestamp"].between(
+            as_of - pd.Timedelta(minutes=window_minutes),
+            as_of,
+        )
+    ].copy()
+
+    exact = station.loc[station["timestamp"].eq(as_of)]
+
+    if exact.empty:
+        return {
+            "raw_flow_gpm": np.nan,
+            "smoothed_flow_gpm": np.nan,
+            "flow_quality": "No exact telemetry record",
+        }
+
+    raw_flow = pd.to_numeric(
+        exact.iloc[-1].get("flow_gpm"),
+        errors="coerce",
+    )
+
+    pump_1 = pd.to_numeric(
+        exact.iloc[-1].get("pump1_status"),
+        errors="coerce",
+    )
+
+    pump_2 = pd.to_numeric(
+        exact.iloc[-1].get("pump2_status"),
+        errors="coerce",
+    )
+
+    pumps_running = (
+        (0 if pd.isna(pump_1) else pump_1)
+        + (0 if pd.isna(pump_2) else pump_2)
+    )
+
+    valid_flow = pd.to_numeric(
+        station["flow_gpm"],
+        errors="coerce",
+    )
+
+    if pumps_running > 0:
+        valid_flow = valid_flow[valid_flow > 0]
+
+    smoothed_flow = (
+        valid_flow.median()
+        if not valid_flow.empty
+        else np.nan
+    )
+
+    if pumps_running > 0 and raw_flow == 0:
+        quality = "Pump running; raw flow tag reports zero"
+    elif pd.isna(raw_flow):
+        quality = "Flow telemetry unavailable"
+    else:
+        quality = "Reported"
+
+    return {
+        "raw_flow_gpm": raw_flow,
+        "smoothed_flow_gpm": smoothed_flow,
+        "flow_quality": quality,
+    }
 
 @cache_data(show_spinner=False)
 def load_asset_locations() -> pd.DataFrame:
