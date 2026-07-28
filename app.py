@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from html import escape
 
+import folium
 import numpy as np
 import pandas as pd
-import folium
 import plotly.graph_objects as go
 import streamlit as st
 from folium.plugins import Fullscreen
@@ -114,6 +115,292 @@ def display_value(value, digits: int = 1, suffix: str = "", unavailable: str = "
     return fmt(numeric, digits, suffix) if pd.notna(numeric) else unavailable
 
 
+def selected_asset_from_map(
+    map_event: dict | None,
+    assets: pd.DataFrame,
+) -> str | None:
+    """Resolve a clicked Folium marker to an asset ID."""
+
+    if not map_event or assets is None or assets.empty:
+        return None
+
+    tooltip = map_event.get("last_object_clicked_tooltip")
+    if tooltip:
+        tooltip_text = str(tooltip).strip()
+
+        asset_match = assets.loc[
+            assets["asset_id"].astype(str).eq(tooltip_text)
+        ]
+        if not asset_match.empty:
+            return str(asset_match.iloc[0]["asset_id"])
+
+        name_match = assets.loc[
+            assets["display_name"].astype(str).eq(tooltip_text)
+        ]
+        if not name_match.empty:
+            return str(name_match.iloc[0]["asset_id"])
+
+    clicked = map_event.get("last_object_clicked")
+    if not isinstance(clicked, dict):
+        return None
+
+    clicked_lat = pd.to_numeric(clicked.get("lat"), errors="coerce")
+    clicked_lon = pd.to_numeric(clicked.get("lng"), errors="coerce")
+
+    if pd.isna(clicked_lat) or pd.isna(clicked_lon):
+        return None
+
+    candidates = assets.copy()
+    candidates["_lat"] = pd.to_numeric(candidates["lat"], errors="coerce")
+    candidates["_lon"] = pd.to_numeric(candidates["lon"], errors="coerce")
+    candidates = candidates.dropna(subset=["_lat", "_lon"])
+
+    if candidates.empty:
+        return None
+
+    candidates["_distance_sq"] = (
+        (candidates["_lat"] - clicked_lat) ** 2
+        + (candidates["_lon"] - clicked_lon) ** 2
+    )
+
+    closest = candidates.sort_values("_distance_sq").iloc[0]
+
+    # About 55 metres at Hull's latitude. This prevents ordinary map clicks
+    # from being mistaken for station-marker clicks.
+    if float(closest["_distance_sq"]) > 0.0005**2:
+        return None
+
+    return str(closest["asset_id"])
+
+
+def percentile_score(
+    value,
+    reference: pd.Series,
+    lower_quantile: float = 0.10,
+    upper_quantile: float = 0.95,
+) -> float:
+    """Normalize a value to 0–1 using reference percentiles."""
+
+    numeric_value = pd.to_numeric(value, errors="coerce")
+    numeric_reference = pd.to_numeric(reference, errors="coerce").dropna()
+
+    if pd.isna(numeric_value) or numeric_reference.empty:
+        return np.nan
+
+    lower = numeric_reference.quantile(lower_quantile)
+    upper = numeric_reference.quantile(upper_quantile)
+
+    if pd.isna(lower) or pd.isna(upper) or upper <= lower:
+        return np.nan
+
+    return float(np.clip((numeric_value - lower) / (upper - lower), 0, 1))
+
+
+def calculate_operational_response_index(
+    collection: pd.DataFrame,
+    influent: pd.DataFrame,
+    assets: pd.DataFrame,
+    snapshot: pd.DataFrame,
+    as_of: pd.Timestamp,
+    rain_value,
+    rain_reference: pd.Series,
+) -> dict:
+    """Calculate a 0–100 screening index from five operational components.
+
+    No nearest timestamp, carry-forward value, or interpolated value is used.
+    If any required component is unavailable at the exact playback time, the
+    composite index is reported as incomplete.
+    """
+
+    components = {
+        "Collection excess flow": np.nan,
+        "Pumps operating": np.nan,
+        "Wet-well utilization": np.nan,
+        "Plant influent": np.nan,
+        "Rainfall": np.nan,
+    }
+
+    # --------------------------------------------------------------
+    # Collection-system flow above an hour-of-week dry-weather proxy
+    # --------------------------------------------------------------
+    if (
+        collection is not None
+        and not collection.empty
+        and {"timestamp", "flow_gpm"}.issubset(collection.columns)
+    ):
+        total_flow = collection[["timestamp", "flow_gpm"]].copy()
+        total_flow["timestamp"] = pd.to_datetime(
+            total_flow["timestamp"],
+            errors="coerce",
+        ).dt.floor("min")
+        total_flow["flow_gpm"] = pd.to_numeric(
+            total_flow["flow_gpm"],
+            errors="coerce",
+        )
+        total_flow = (
+            total_flow.dropna(subset=["timestamp"])
+            .groupby("timestamp", as_index=False)["flow_gpm"]
+            .sum(min_count=1)
+        )
+
+        if not total_flow.empty:
+            total_flow["hour_of_week"] = (
+                total_flow["timestamp"].dt.dayofweek * 24
+                + total_flow["timestamp"].dt.hour
+            )
+            hourly_baseline = total_flow.groupby(
+                "hour_of_week"
+            )["flow_gpm"].median()
+
+            total_flow["baseline_gpm"] = total_flow[
+                "hour_of_week"
+            ].map(hourly_baseline)
+            total_flow["excess_gpm"] = (
+                total_flow["flow_gpm"] - total_flow["baseline_gpm"]
+            ).clip(lower=0)
+
+            exact_total = total_flow.loc[
+                total_flow["timestamp"].eq(
+                    pd.Timestamp(as_of).floor("min")
+                )
+            ]
+
+            if not exact_total.empty:
+                exact_excess = exact_total.iloc[-1]["excess_gpm"]
+                components["Collection excess flow"] = percentile_score(
+                    exact_excess,
+                    total_flow["excess_gpm"],
+                )
+
+    # --------------------------------------------------------------
+    # Share of available station pumps operating at exact playback
+    # --------------------------------------------------------------
+    if snapshot is not None and not snapshot.empty:
+        pump_columns = [
+            column
+            for column in ("pump1_status", "pump2_status")
+            if column in snapshot.columns
+        ]
+
+        if pump_columns:
+            pump_values = pd.concat(
+                [
+                    pd.to_numeric(
+                        snapshot[column],
+                        errors="coerce",
+                    )
+                    for column in pump_columns
+                ],
+                ignore_index=True,
+            ).dropna()
+
+            if not pump_values.empty:
+                components["Pumps operating"] = float(
+                    np.clip((pump_values > 0).mean(), 0, 1)
+                )
+
+        if "level_in" in snapshot.columns:
+            levels = pd.to_numeric(
+                snapshot["level_in"],
+                errors="coerce",
+            ).dropna()
+
+            if not levels.empty:
+                components["Wet-well utilization"] = float(
+                    np.clip(
+                        levels.max() / WET_WELL_REFERENCE_DEPTH_IN,
+                        0,
+                        1,
+                    )
+                )
+
+    # --------------------------------------------------------------
+    # Exact-minute plant influent relative to observed distribution
+    # --------------------------------------------------------------
+    if (
+        influent is not None
+        and not influent.empty
+        and {"timestamp", "influent_total_mgd"}.issubset(influent.columns)
+    ):
+        influent_data = influent[
+            ["timestamp", "influent_total_mgd"]
+        ].copy()
+        influent_data["timestamp"] = pd.to_datetime(
+            influent_data["timestamp"],
+            errors="coerce",
+        ).dt.floor("min")
+        influent_data["influent_total_mgd"] = pd.to_numeric(
+            influent_data["influent_total_mgd"],
+            errors="coerce",
+        )
+
+        exact_influent = influent_data.loc[
+            influent_data["timestamp"].eq(
+                pd.Timestamp(as_of).floor("min")
+            )
+        ]
+
+        if not exact_influent.empty:
+            components["Plant influent"] = percentile_score(
+                exact_influent.iloc[-1]["influent_total_mgd"],
+                influent_data["influent_total_mgd"],
+            )
+
+    # --------------------------------------------------------------
+    # Selected-day rainfall relative to the historical daily range
+    # --------------------------------------------------------------
+    components["Rainfall"] = percentile_score(
+        rain_value,
+        rain_reference,
+    )
+
+    weights = {
+        "Collection excess flow": 0.30,
+        "Pumps operating": 0.20,
+        "Wet-well utilization": 0.20,
+        "Plant influent": 0.20,
+        "Rainfall": 0.10,
+    }
+
+    complete = all(pd.notna(value) for value in components.values())
+
+    if complete:
+        index_value = 100 * sum(
+            components[name] * weights[name]
+            for name in weights
+        )
+    else:
+        index_value = np.nan
+
+    if pd.isna(index_value):
+        label = "INCOMPLETE"
+        color = "#98A5B3"
+    elif index_value >= 80:
+        label = "CRITICAL RESPONSE"
+        color = RED
+    elif index_value >= 60:
+        label = "HIGH SYSTEM STRESS"
+        color = AMBER
+    elif index_value >= 40:
+        label = "WET WEATHER RESPONSE"
+        color = LIME
+    elif index_value >= 20:
+        label = "ELEVATED"
+        color = MUTED_BLUE
+    else:
+        label = "NORMAL"
+        color = GREEN
+
+    return {
+        "value": index_value,
+        "label": label,
+        "color": color,
+        "complete": complete,
+        "components": components,
+        "weights": weights,
+    }
+
+
 inject_css()
 
 with st.spinner("Loading 2026 operating data..."):
@@ -207,12 +494,6 @@ playback_hour = st.sidebar.slider(
 )
 as_of = event_start + pd.Timedelta(hours=playback_hour)
 
-st.session_state["playback_selected_day"] = selected_day
-st.session_state["playback_event_start"] = event_start
-st.session_state["playback_event_end"] = event_end
-st.session_state["playback_as_of"] = as_of
-st.session_state["playback_lookback_hours"] = EVENT_WINDOW_HOURS
-
 response_label = response_day.strftime("%b %d, %Y") if pd.notna(response_day) else "Unavailable"
 render_header(
     f"Historical Playback | Trigger {selected_day:%b %d, %Y} | Response {response_label}"
@@ -274,16 +555,40 @@ else:
     reporting_stations = 0
     running_text = "Unavailable"
 
+
+ori = calculate_operational_response_index(
+    collection=collection,
+    influent=influent,
+    assets=assets if "assets" in locals() else pd.DataFrame(),
+    snapshot=snap,
+    as_of=as_of,
+    rain_value=rain_val,
+    rain_reference=history_2026["rain_in"],
+)
+
+ori_value = ori["value"]
+ori_text = (
+    f"{ori_value:.0f}"
+    if pd.notna(ori_value)
+    else "Incomplete"
+)
+
 severity, sev_color = score_severity(storm_score, score_complete)
 rain_text = display_value(rain_val, 2, " in", "Unavailable")
-score_text = display_value(storm_score * 100 if pd.notna(storm_score) else np.nan, 0, "%", "Incomplete")
+score_text = display_value(
+    storm_score * 100 if pd.notna(storm_score) else np.nan,
+    0,
+    "%",
+    "Incomplete",
+)
 lag_text = display_value(response_lag, 0, " hr", "Unavailable")
 
 st.markdown(
-    f'<div class="status-strip" style="border-left-color:{sev_color}">'
-    f'<b style="color:{NAVY}">{severity} WET WEATHER STATUS</b>'
-    f' &nbsp; Storm score {score_text} | Rainfall {rain_text} | '
-    f'plant response lag {lag_text} | Stations running {running_text}</div>',
+    f'<div class="status-strip" style="border-left-color:{ori["color"]}">'
+    f'<b style="color:{NAVY}">{ori["label"]}</b>'
+    f' &nbsp; Operational Response Index {ori_text} / 100 | '
+    f'Rainfall {rain_text} | Plant response lag {lag_text} | '
+    f'Stations running {running_text}</div>',
     unsafe_allow_html=True,
 )
 
@@ -298,7 +603,7 @@ items = [
         display_value(row.get("total_runtime_72h"), 1, " hr"),
         "Trigger plus two calendar days",
     ),
-    ("Storm score", score_text, "Relative composite; complete inputs only"),
+    ("Operational response", f"{ori_text} / 100", ori["label"].title()),
 ]
 
 for column, (label, value, subtitle) in zip(kpis, items):
@@ -307,6 +612,48 @@ for column, (label, value, subtitle) in zip(kpis, items):
         f'<div class="kpi-value">{value}</div>'
         f'<div class="kpi-sub">{subtitle}</div></div>',
         unsafe_allow_html=True,
+    )
+
+with st.expander("How the Operational Response Index is calculated"):
+    st.markdown(
+        """
+The **Operational Response Index (ORI)** is a 0–100 screening indicator of
+how strongly the collection and treatment system is responding at the exact
+playback moment. It is not a permit limit, failure probability, or calibrated
+hydraulic-model result.
+
+The current weighting is:
+
+- **30%** collection-system flow above its hour-of-week baseline
+- **20%** share of available station pumps operating
+- **20%** highest wet-well utilization
+- **20%** exact-minute plant influent relative to observed conditions
+- **10%** selected-day rainfall relative to the historical daily range
+
+No nearest timestamp, carry-forward value, or interpolation is used. The
+composite is shown as **Incomplete** when any required component is unavailable.
+        """
+    )
+
+    component_rows = []
+
+    for component_name, component_score in ori["components"].items():
+        component_rows.append(
+            {
+                "Component": component_name,
+                "Weight": f'{ori["weights"][component_name] * 100:.0f}%',
+                "Score": (
+                    f"{component_score * 100:.0f}"
+                    if pd.notna(component_score)
+                    else "Unavailable"
+                ),
+            }
+        )
+
+    st.dataframe(
+        pd.DataFrame(component_rows),
+        hide_index=True,
+        use_container_width=True,
     )
 
 with st.expander("How the dashboard scores are calculated"):
@@ -385,14 +732,16 @@ colors = {
 
 radar_layer = nws_radar_layer()
 
-radar_toggle_col, opacity_col, radar_status_col = st.columns([1.2, 1.5, 3.3])
+radar_toggle_col, opacity_col, radar_status_col = st.columns(
+    [1.2, 1.5, 3.3]
+)
 
 with radar_toggle_col:
     show_radar = st.toggle(
         "NWS radar",
         value=True,
         help=(
-            "Show the current NOAA/NWS MRMS quality-controlled "
+            "Overlay the current NOAA/NWS MRMS quality-controlled "
             "base-reflectivity mosaic."
         ),
     )
@@ -402,23 +751,26 @@ with opacity_col:
         "Radar opacity",
         min_value=0.10,
         max_value=0.80,
-        value=0.42,
+        value=0.40,
         step=0.05,
         disabled=not show_radar,
     )
 
 with radar_status_col:
     st.caption(
-        "Current NOAA/NWS MRMS base reflectivity. "
-        "The radar is live and does not follow the historical playback date."
+        "Radar is live/current NOAA/NWS MRMS data. Pump-station values remain "
+        f"historical at **{as_of:%b %d, %Y %I:%M %p}**. "
+        "A clear radar layer may simply mean no precipitation is detected."
     )
 
 left, right = st.columns([2.45, 1], gap="medium")
 
-with left:
-    selected_asset = st.session_state.get("selected_asset", "PS 3")
+selected_asset = str(
+    st.session_state.get("selected_asset", "PS 3")
+)
 
-    system_map = folium.Map(
+with left:
+    hull_map = folium.Map(
         location=[42.286, -70.882],
         zoom_start=12,
         tiles=None,
@@ -429,123 +781,126 @@ with left:
     folium.TileLayer(
         tiles="OpenStreetMap",
         name="Street map",
-        overlay=False,
         control=True,
         show=True,
-    ).add_to(system_map)
+    ).add_to(hull_map)
 
     folium.TileLayer(
         tiles=(
-            "https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png"
+            "https://{s}.basemaps.cartocdn.com/light_all/"
+            "{z}/{x}/{y}{r}.png"
         ),
-        attr="OpenStreetMap contributors, Tiles style by HOT",
-        name="High-contrast streets",
-        overlay=False,
+        attr="© OpenStreetMap contributors © CARTO",
+        name="Light map",
         control=True,
         show=False,
-    ).add_to(system_map)
+    ).add_to(hull_map)
 
-    radar_wms_url = radar_layer.get("wms_url") or radar_layer.get("url")
-    radar_layers = radar_layer.get("layers")
-
-    if show_radar and radar_wms_url and radar_layers:
-        folium.WmsTileLayer(
-            url=radar_wms_url,
-            layers=radar_layers,
+    if show_radar:
+        folium.raster_layers.WmsTileLayer(
+            url=radar_layer["wms_url"],
+            layers=radar_layer["layers"],
             styles=radar_layer.get("styles", ""),
-            fmt="image/png",
+            fmt=radar_layer.get("format", "image/png"),
             transparent=True,
-            version=radar_layer.get("version", "1.1.1"),
-            attr=radar_layer.get("attribution", "Radar: NOAA/NWS MRMS"),
+            version=radar_layer.get("version", "1.3.0"),
             name="NOAA/NWS MRMS radar",
+            attr=radar_layer["attribution"],
+            opacity=radar_opacity,
             overlay=True,
             control=True,
             show=True,
-            opacity=radar_opacity,
-        ).add_to(system_map)
-    elif show_radar:
-        st.warning("The NWS radar layer configuration is incomplete, so the overlay was omitted.")
+        ).add_to(hull_map)
 
-    station_group = folium.FeatureGroup(
-        name="Facilities",
-        overlay=True,
-        control=True,
-        show=True,
-    ).add_to(system_map)
+    for _, asset_row in assets.iterrows():
+        latitude = pd.to_numeric(asset_row.get("lat"), errors="coerce")
+        longitude = pd.to_numeric(asset_row.get("lon"), errors="coerce")
 
-    for _, map_asset in assets.iterrows():
-        lat = pd.to_numeric(map_asset.get("lat"), errors="coerce")
-        lon = pd.to_numeric(map_asset.get("lon"), errors="coerce")
-
-        if pd.isna(lat) or pd.isna(lon):
+        if pd.isna(latitude) or pd.isna(longitude):
             continue
 
-        asset_id = str(map_asset.get("asset_id", "Unavailable"))
-        display_name = str(map_asset.get("display_name", asset_id))
-        address = str(map_asset.get("address", "Address unavailable"))
-        asset_status = str(map_asset.get("status", "No Data"))
-        asset_type = str(map_asset.get("asset_type", "Pump Station"))
+        asset_id = str(asset_row.get("asset_id", ""))
+        display_name = str(asset_row.get("display_name", asset_id))
+        asset_type = str(asset_row.get("asset_type", "Pump Station"))
+        status = str(asset_row.get("status", "No Data"))
+        address = str(asset_row.get("address", "Address unavailable"))
 
-        marker_color = colors.get(asset_status, "#98A5B3")
-        marker_radius = 12 if asset_type == "Treatment Plant" else 8
-        marker_weight = 4 if asset_id == selected_asset else 2
+        flow_text = display_value(
+            asset_row.get("flow_gpm"),
+            0,
+            " gpm",
+        )
+        level_text = display_value(
+            asset_row.get("level_in"),
+            1,
+            " in",
+        )
 
-        flow_value = display_value(map_asset.get("flow_gpm"), 0, " gpm")
-        level_value = display_value(map_asset.get("level_in"), 1, " in")
+        marker_color = colors.get(status, "#98A5B3")
+        marker_radius = 10 if asset_type == "Treatment Plant" else 7
+
+        if asset_id == selected_asset:
+            marker_radius += 2
+            marker_weight = 4
+        else:
+            marker_weight = 2
 
         popup_html = (
-            f'<div style="min-width:220px">'
-            f'<b>{display_name}</b><br>'
-            f'<span>{address}</span><hr style="margin:7px 0">'
-            f'Status: <b>{asset_status}</b><br>'
-            f'Wet well: <b>{level_value}</b><br>'
-            f'Flow: <b>{flow_value}</b><br>'
-            f'<span style="color:#73808c">Click marker to select {asset_id}</span>'
-            f'</div>'
+            '<div style="min-width:220px">'
+            f"<b>{escape(display_name)}</b><br>"
+            f"<span>{escape(address)}</span><br><br>"
+            f"Status: <b>{escape(status)}</b><br>"
+            f"Wet well: <b>{escape(level_text)}</b><br>"
+            f"Reported flow: <b>{escape(flow_text)}</b><br>"
+            f'<span style="font-size:11px;color:#667085">'
+            f"Asset ID: {escape(asset_id)}</span>"
+            "</div>"
         )
 
         folium.CircleMarker(
-            location=[float(lat), float(lon)],
+            location=[float(latitude), float(longitude)],
             radius=marker_radius,
-            color="#FFFFFF",
+            tooltip=asset_id,
+            popup=folium.Popup(popup_html, max_width=320),
+            color="white",
             weight=marker_weight,
             fill=True,
             fill_color=marker_color,
             fill_opacity=0.95,
-            tooltip=asset_id,
-            popup=folium.Popup(popup_html, max_width=320),
-        ).add_to(station_group)
+            pane="markerPane",
+        ).add_to(hull_map)
 
     Fullscreen(
         position="topright",
         title="Expand map",
         title_cancel="Exit full screen",
         force_separate_button=True,
-    ).add_to(system_map)
+    ).add_to(hull_map)
 
     folium.LayerControl(
-        position="topright",
         collapsed=True,
-    ).add_to(system_map)
+        position="topright",
+    ).add_to(hull_map)
 
     map_event = st_folium(
-        system_map,
+        hull_map,
         use_container_width=True,
         height=650,
         key="system_map",
-        returned_objects=["last_object_clicked_tooltip"],
     )
 
-    clicked_asset = (map_event or {}).get("last_object_clicked_tooltip")
+    clicked_asset = selected_asset_from_map(
+        map_event,
+        assets,
+    )
 
-    if clicked_asset in assets["asset_id"].astype(str).tolist():
-        if clicked_asset != selected_asset:
-            st.session_state.selected_asset = clicked_asset
-            selected_asset = clicked_asset
-            st.rerun()
+    if clicked_asset and clicked_asset != selected_asset:
+        selected_asset = clicked_asset
+        st.session_state.selected_asset = selected_asset
+        st.rerun()
 
 with right:
-    choices = assets["asset_id"].tolist()
+    choices = assets["asset_id"].astype(str).tolist()
     selected_asset = st.selectbox(
         "Selected asset",
         choices,
@@ -767,7 +1122,7 @@ fig.update_layout(
     legend=dict(orientation="h", y=1.13),
     hovermode="x unified",
     xaxis=dict(showgrid=False, range=[event_start, event_end]),
-    yaxis=dict(title="Operational response index", gridcolor="#EDF1F5"),
+    yaxis=dict(title="Scaled operational signals", gridcolor="#EDF1F5"),
 )
 st.plotly_chart(fig, use_container_width=True)
 
