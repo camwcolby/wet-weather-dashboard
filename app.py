@@ -27,19 +27,19 @@ from models.operations_summary import build_operations_summary
 from models.pump_cycles import count_pump_cycles, station_cycle_summary
 from models.storm_selection import rank_events
 from services.data_loader import (
+    load_asset_locations,
     load_collection,
+    load_historical_influent_rain,
     load_influent,
     load_process_summary,
     load_station_runtimes,
-    latest_snapshot,
-    load_asset_locations,
     station_flow_snapshot,
 )
 from services.marine import marine_forecast
 from services.tides import historical_tides, tide_predictions
 from services.weather import nws_bundle
 from utils.formatting import fmt, status_from_utilization
-
+from services.radar import latest_radar_frame
 
 EVENT_WINDOW_HOURS = 72
 WET_WELL_REFERENCE_DEPTH_IN = 84.0
@@ -375,9 +375,55 @@ colors = {
     "Plant": NAVY,
 }
 
+radar_frame = latest_radar_frame()
+
+radar_toggle_col, opacity_col, radar_time_col = st.columns([1.2, 1.5, 3.3])
+
+with radar_toggle_col:
+    show_radar = st.toggle(
+        "Live radar",
+        value=True,
+        help="Show the latest available observed radar frame over the map.",
+    )
+
+with opacity_col:
+    radar_opacity = st.slider(
+        "Radar opacity",
+        min_value=0.10,
+        max_value=0.80,
+        value=0.42,
+        step=0.05,
+        disabled=not show_radar,
+    )
+
+with radar_time_col:
+    if radar_frame is not None:
+        radar_timestamp = radar_frame["timestamp"].tz_convert(
+            "America/New_York"
+        )
+        st.caption(
+            "Latest observed radar frame: "
+            f"{radar_timestamp:%b %d, %Y at %I:%M %p %Z}"
+        )
+    else:
+        st.caption("Radar overlay unavailable")
+
 left, right = st.columns([2.45, 1], gap="medium")
 
 with left:
+    hover_data = {
+        "address": True,
+        "lat": False,
+        "lon": False,
+        "status": False,
+    }
+
+    if "flow_gpm" in assets.columns:
+        hover_data["flow_gpm"] = ":.0f"
+
+    if "level_in" in assets.columns:
+        hover_data["level_in"] = ":.1f"
+
     fig = px.scatter_map(
         assets,
         lat="lat",
@@ -388,20 +434,28 @@ with left:
             {"Treatment Plant": 28, "Pump Station": 18}
         ).fillna(18),
         hover_name="display_name",
-        hover_data={
-            "address": True,
-            "flow_gpm": ":.0f",
-            "level_in": ":.1f",
-            "lat": False,
-            "lon": False,
-            "status": False,
-        },
+        hover_data=hover_data,
         zoom=12.0,
         center={"lat": 42.286, "lon": -70.882},
         height=650,
     )
+
+    map_layers = []
+
+    if show_radar and radar_frame is not None:
+        map_layers.append(
+            {
+                "sourcetype": "raster",
+                "source": [radar_frame["tile_url"]],
+                "sourceattribution": "Weather radar: RainViewer",
+                "opacity": radar_opacity,
+                "below": "traces",
+            }
+        )
+
     fig.update_layout(
         map_style="open-street-map",
+        map_layers=map_layers,
         margin=dict(l=0, r=0, t=0, b=0),
         legend=dict(
             orientation="h",
@@ -421,16 +475,20 @@ with left:
     )
 
     selected_asset = st.session_state.get("selected_asset", "PS 3")
+
     try:
         points = event.selection.points if event and event.selection else []
+
         if points:
             name = points[0].get("hovertext") or points[0].get(
                 "customdata", [None]
             )[0]
             match = assets.loc[assets["display_name"] == name]
+
             if not match.empty:
                 selected_asset = match.iloc[0]["asset_id"]
                 st.session_state.selected_asset = selected_asset
+
     except (AttributeError, IndexError, KeyError, TypeError):
         pass
 
@@ -449,7 +507,10 @@ with right:
     p2_value = pd.to_numeric(asset.get("pump2_status"), errors="coerce")
     pumps_available = pd.notna(p1_value) or pd.notna(p2_value)
     pumps_running = (
-        int((0 if pd.isna(p1_value) else p1_value) + (0 if pd.isna(p2_value) else p2_value))
+        int(
+            (0 if pd.isna(p1_value) else p1_value)
+            + (0 if pd.isna(p2_value) else p2_value)
+        )
         if pumps_available
         else "Unavailable"
     )
@@ -461,7 +522,28 @@ with right:
     )
 
     wet_well_text = display_value(asset.get("level_in"), 1, " in")
-    flow_text = display_value(asset.get("flow_gpm"), 0, " gpm")
+
+    flow_snapshot = station_flow_snapshot(
+        collection=collection,
+        asset_id=selected_asset,
+        as_of=as_of,
+        window_minutes=5,
+    )
+
+    reported_flow_text = display_value(
+        flow_snapshot.get("raw_flow_gpm"),
+        0,
+        " gpm",
+    )
+    recent_flow_text = display_value(
+        flow_snapshot.get("smoothed_flow_gpm"),
+        0,
+        " gpm",
+    )
+    flow_quality = flow_snapshot.get(
+        "flow_quality",
+        "Flow telemetry unavailable",
+    )
 
     st.markdown(
         f'<div class="panel"><div class="station-title">{asset["display_name"]}</div>'
@@ -470,9 +552,13 @@ with right:
         f'<hr style="border:none;border-top:1px solid #E8EDF2;margin:12px 0">'
         f'<b>Playback snapshot</b><br><br>'
         f'Wet well <b style="float:right">{wet_well_text}</b><br>'
-        f'Flow <b style="float:right">{flow_text}</b><br>'
+        f'Reported flow <b style="float:right">{reported_flow_text}</b><br>'
+        f'Recent operating flow <b style="float:right">{recent_flow_text}</b><br>'
         f'Pumps running <b style="float:right">{pumps_running}</b><br>'
-        f'Design capacity <b style="float:right">{capacity}</b></div>',
+        f'Design capacity <b style="float:right">{capacity}</b>'
+        f'<hr style="border:none;border-top:1px solid #E8EDF2;margin:12px 0 8px">'
+        f'<span style="color:#73808c;font-size:.78rem">{flow_quality}</span>'
+        f'</div>',
         unsafe_allow_html=True,
     )
 
