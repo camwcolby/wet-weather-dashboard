@@ -39,7 +39,7 @@ from services.marine import marine_forecast
 from services.tides import historical_tides, tide_predictions
 from services.weather import nws_bundle
 from utils.formatting import fmt, status_from_utilization
-from services.radar import nws_radar_layer
+from services.radar import latest_radar_frame
 
 EVENT_WINDOW_HOURS = 72
 WET_WELL_REFERENCE_DEPTH_IN = 84.0
@@ -375,7 +375,7 @@ colors = {
     "Plant": NAVY,
 }
 
-radar_layer = nws_radar_layer()
+radar_frame = latest_radar_frame()
 
 radar_toggle_col, opacity_col, radar_time_col = st.columns([1.2, 1.5, 3.3])
 
@@ -396,30 +396,17 @@ with opacity_col:
         disabled=not show_radar,
     )
 
-radar_layer = nws_radar_layer()
-
-radar_toggle_col, opacity_col, radar_status_col = st.columns(
-    [1.2, 1.5, 3.3]
-)
-
-with radar_toggle_col:
-    show_radar = st.toggle(
-        "NWS Radar",
-        value=True,
-    )
-
-with opacity_col:
-    radar_opacity = st.slider(
-        "Opacity",
-        min_value=0.10,
-        max_value=0.80,
-        value=0.40,
-        step=0.05,
-        disabled=not show_radar,
-    )
-
-with radar_status_col:
-    st.success("🟢 NOAA/NWS MRMS radar connected")
+with radar_time_col:
+    if radar_frame is not None:
+        radar_timestamp = radar_frame["timestamp"].tz_convert(
+            "America/New_York"
+        )
+        st.caption(
+            "Latest observed radar frame: "
+            f"{radar_timestamp:%b %d, %Y at %I:%M %p %Z}"
+        )
+    else:
+        st.caption("Radar overlay unavailable")
 
 left, right = st.columns([2.45, 1], gap="medium")
 
@@ -444,55 +431,28 @@ with left:
         color="status",
         color_discrete_map=colors,
         size=assets["asset_type"].map(
-            {
-                "Treatment Plant": 28,
-                "Pump Station": 18,
-            }
+            {"Treatment Plant": 28, "Pump Station": 18}
         ).fillna(18),
         hover_name="display_name",
         hover_data=hover_data,
         zoom=12.0,
-        center={
-            "lat": 42.286,
-            "lon": -70.882,
-        },
+        center={"lat": 42.286, "lon": -70.882},
         height=650,
     )
 
     map_layers = []
 
-    if show_radar:
+    if show_radar and radar_frame is not None:
         map_layers.append(
             {
                 "sourcetype": "raster",
-                "source": [
-                    radar_layer["tile_url"]
-                ],
-                "sourceattribution": radar_layer[
-                    "attribution"
-                ],
+                "source": [radar_frame["tile_url"]],
+                "sourceattribution": "Weather radar: RainViewer",
                 "opacity": radar_opacity,
                 "below": "traces",
             }
         )
 
-    fig.update_layout(
-        map_style="open-street-map",
-        map_layers=map_layers,
-        margin=dict(
-            l=0,
-            r=0,
-            t=0,
-            b=0,
-        ),
-        legend=dict(
-            orientation="h",
-            y=1.01,
-            x=0.01,
-            bgcolor="rgba(255,255,255,.86)",
-        ),
-        clickmode="event+select",
-    )
     fig.update_layout(
         map_style="open-street-map",
         map_layers=map_layers,
