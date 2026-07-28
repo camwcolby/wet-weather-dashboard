@@ -39,7 +39,7 @@ from services.marine import marine_forecast
 from services.tides import historical_tides, tide_predictions
 from services.weather import nws_bundle
 from utils.formatting import fmt, status_from_utilization
-from services.radar import latest_radar_frame
+from services.radar import nws_radar_layer
 
 EVENT_WINDOW_HOURS = 72
 WET_WELL_REFERENCE_DEPTH_IN = 84.0
@@ -375,7 +375,7 @@ colors = {
     "Plant": NAVY,
 }
 
-radar_frame = latest_radar_frame()
+radar_layer = nws_radar_layer()
 
 radar_toggle_col, opacity_col, radar_time_col = st.columns([1.2, 1.5, 3.3])
 
