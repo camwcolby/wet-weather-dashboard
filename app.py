@@ -4,9 +4,11 @@ from datetime import timedelta
 
 import numpy as np
 import pandas as pd
-import plotly.express as px
+import folium
 import plotly.graph_objects as go
 import streamlit as st
+from folium.plugins import Fullscreen
+from streamlit_folium import st_folium
 
 st.set_page_config(
     page_title="Hull Wet Weather Operations",
@@ -39,7 +41,7 @@ from services.marine import marine_forecast
 from services.tides import historical_tides, tide_predictions
 from services.weather import nws_bundle
 from utils.formatting import fmt, status_from_utilization
-from services.radar import latest_radar_frame
+from services.radar import nws_radar_layer
 
 EVENT_WINDOW_HOURS = 72
 WET_WELL_REFERENCE_DEPTH_IN = 84.0
@@ -375,15 +377,18 @@ colors = {
     "Plant": NAVY,
 }
 
-radar_frame = latest_radar_frame()
+radar_layer = nws_radar_layer()
 
-radar_toggle_col, opacity_col, radar_time_col = st.columns([1.2, 1.5, 3.3])
+radar_toggle_col, opacity_col, radar_status_col = st.columns([1.2, 1.5, 3.3])
 
 with radar_toggle_col:
     show_radar = st.toggle(
-        "Live radar",
+        "NWS radar",
         value=True,
-        help="Show the latest available observed radar frame over the map.",
+        help=(
+            "Show the current NOAA/NWS MRMS quality-controlled "
+            "base-reflectivity mosaic."
+        ),
     )
 
 with opacity_col:
@@ -396,101 +401,142 @@ with opacity_col:
         disabled=not show_radar,
     )
 
-with radar_time_col:
-    if radar_frame is not None:
-        radar_timestamp = radar_frame["timestamp"].tz_convert(
-            "America/New_York"
-        )
-        st.caption(
-            "Latest observed radar frame: "
-            f"{radar_timestamp:%b %d, %Y at %I:%M %p %Z}"
-        )
-    else:
-        st.caption("Radar overlay unavailable")
+with radar_status_col:
+    st.caption(
+        "Current NOAA/NWS MRMS base reflectivity. "
+        "The radar is live and does not follow the historical playback date."
+    )
 
 left, right = st.columns([2.45, 1], gap="medium")
 
 with left:
-    hover_data = {
-        "address": True,
-        "lat": False,
-        "lon": False,
-        "status": False,
-    }
-
-    if "flow_gpm" in assets.columns:
-        hover_data["flow_gpm"] = ":.0f"
-
-    if "level_in" in assets.columns:
-        hover_data["level_in"] = ":.1f"
-
-    fig = px.scatter_map(
-        assets,
-        lat="lat",
-        lon="lon",
-        color="status",
-        color_discrete_map=colors,
-        size=assets["asset_type"].map(
-            {"Treatment Plant": 28, "Pump Station": 18}
-        ).fillna(18),
-        hover_name="display_name",
-        hover_data=hover_data,
-        zoom=12.0,
-        center={"lat": 42.286, "lon": -70.882},
-        height=650,
-    )
-
-    map_layers = []
-
-    if show_radar and radar_frame is not None:
-        map_layers.append(
-            {
-                "sourcetype": "raster",
-                "source": [radar_frame["tile_url"]],
-                "sourceattribution": "Weather radar: RainViewer",
-                "opacity": radar_opacity,
-                "below": "traces",
-            }
-        )
-
-    fig.update_layout(
-        map_style="open-street-map",
-        map_layers=map_layers,
-        margin=dict(l=0, r=0, t=0, b=0),
-        legend=dict(
-            orientation="h",
-            y=1.01,
-            x=0.01,
-            bgcolor="rgba(255,255,255,.86)",
-        ),
-        clickmode="event+select",
-    )
-
-    event = st.plotly_chart(
-        fig,
-        use_container_width=True,
-        on_select="rerun",
-        selection_mode="points",
-        key="system_map",
-    )
-
     selected_asset = st.session_state.get("selected_asset", "PS 3")
 
-    try:
-        points = event.selection.points if event and event.selection else []
+    system_map = folium.Map(
+        location=[42.286, -70.882],
+        zoom_start=12,
+        tiles=None,
+        control_scale=True,
+        prefer_canvas=True,
+    )
 
-        if points:
-            name = points[0].get("hovertext") or points[0].get(
-                "customdata", [None]
-            )[0]
-            match = assets.loc[assets["display_name"] == name]
+    folium.TileLayer(
+        tiles="OpenStreetMap",
+        name="Street map",
+        overlay=False,
+        control=True,
+        show=True,
+    ).add_to(system_map)
 
-            if not match.empty:
-                selected_asset = match.iloc[0]["asset_id"]
-                st.session_state.selected_asset = selected_asset
+    folium.TileLayer(
+        tiles=(
+            "https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png"
+        ),
+        attr="OpenStreetMap contributors, Tiles style by HOT",
+        name="High-contrast streets",
+        overlay=False,
+        control=True,
+        show=False,
+    ).add_to(system_map)
 
-    except (AttributeError, IndexError, KeyError, TypeError):
-        pass
+    radar_wms_url = radar_layer.get("wms_url") or radar_layer.get("url")
+    radar_layers = radar_layer.get("layers")
+
+    if show_radar and radar_wms_url and radar_layers:
+        folium.WmsTileLayer(
+            url=radar_wms_url,
+            layers=radar_layers,
+            styles=radar_layer.get("styles", ""),
+            fmt="image/png",
+            transparent=True,
+            version=radar_layer.get("version", "1.1.1"),
+            attr=radar_layer.get("attribution", "Radar: NOAA/NWS MRMS"),
+            name="NOAA/NWS MRMS radar",
+            overlay=True,
+            control=True,
+            show=True,
+            opacity=radar_opacity,
+        ).add_to(system_map)
+    elif show_radar:
+        st.warning("The NWS radar layer configuration is incomplete, so the overlay was omitted.")
+
+    station_group = folium.FeatureGroup(
+        name="Facilities",
+        overlay=True,
+        control=True,
+        show=True,
+    ).add_to(system_map)
+
+    for _, map_asset in assets.iterrows():
+        lat = pd.to_numeric(map_asset.get("lat"), errors="coerce")
+        lon = pd.to_numeric(map_asset.get("lon"), errors="coerce")
+
+        if pd.isna(lat) or pd.isna(lon):
+            continue
+
+        asset_id = str(map_asset.get("asset_id", "Unavailable"))
+        display_name = str(map_asset.get("display_name", asset_id))
+        address = str(map_asset.get("address", "Address unavailable"))
+        asset_status = str(map_asset.get("status", "No Data"))
+        asset_type = str(map_asset.get("asset_type", "Pump Station"))
+
+        marker_color = colors.get(asset_status, "#98A5B3")
+        marker_radius = 12 if asset_type == "Treatment Plant" else 8
+        marker_weight = 4 if asset_id == selected_asset else 2
+
+        flow_value = display_value(map_asset.get("flow_gpm"), 0, " gpm")
+        level_value = display_value(map_asset.get("level_in"), 1, " in")
+
+        popup_html = (
+            f'<div style="min-width:220px">'
+            f'<b>{display_name}</b><br>'
+            f'<span>{address}</span><hr style="margin:7px 0">'
+            f'Status: <b>{asset_status}</b><br>'
+            f'Wet well: <b>{level_value}</b><br>'
+            f'Flow: <b>{flow_value}</b><br>'
+            f'<span style="color:#73808c">Click marker to select {asset_id}</span>'
+            f'</div>'
+        )
+
+        folium.CircleMarker(
+            location=[float(lat), float(lon)],
+            radius=marker_radius,
+            color="#FFFFFF",
+            weight=marker_weight,
+            fill=True,
+            fill_color=marker_color,
+            fill_opacity=0.95,
+            tooltip=asset_id,
+            popup=folium.Popup(popup_html, max_width=320),
+        ).add_to(station_group)
+
+    Fullscreen(
+        position="topright",
+        title="Expand map",
+        title_cancel="Exit full screen",
+        force_separate_button=True,
+    ).add_to(system_map)
+
+    folium.LayerControl(
+        position="topright",
+        collapsed=True,
+    ).add_to(system_map)
+
+    map_event = st_folium(
+        system_map,
+        use_container_width=True,
+        height=650,
+        key="system_map",
+        returned_objects=["last_object_clicked_tooltip"],
+    )
+
+    clicked_asset = (map_event or {}).get("last_object_clicked_tooltip")
+
+    if clicked_asset in assets["asset_id"].astype(str).tolist():
+        if clicked_asset != selected_asset:
+            st.session_state.selected_asset = clicked_asset
+            selected_asset = clicked_asset
+            st.rerun()
 
 with right:
     choices = assets["asset_id"].tolist()
