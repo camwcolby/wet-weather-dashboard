@@ -75,9 +75,7 @@ def load_process_summary():
         labels2=raw.iloc[5].astype(str)
         cols=[]
         for a,b in zip(labels1,labels2):
-            cols.append(
-    f"{'' if pd.isna(a) else str(a)} {'' if pd.isna(b) else str(b)}".strip()
-)
+            cols.append((a+" "+b).strip().replace("nan ",""))
         df=raw.iloc[6:].copy(); df.columns=cols
         df=df.rename(columns={cols[0]:"date"})
         df["date"]=_excel_datetime(df["date"])
