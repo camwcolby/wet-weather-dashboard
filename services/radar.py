@@ -2,29 +2,21 @@ from __future__ import annotations
 
 
 def nws_radar_layer() -> dict[str, str]:
-    """Return the NOAA/NWS MRMS base-reflectivity WMS tile configuration.
+    """Return a single, consistent configuration for NOAA/NWS MRMS radar.
 
-    MapLibre replaces {bbox-epsg-3857} for each requested map tile.
-    The WMS image itself is transparent, allowing the basemap to remain visible.
+    Both ``wms_url`` and ``url`` are supplied as aliases so an older local map
+    block cannot fail with a KeyError while files are being replaced.
     """
-    tile_url = (
+    endpoint = (
         "https://opengeo.ncep.noaa.gov/geoserver/"
         "conus/conus_bref_qcd/ows"
-        "?service=WMS"
-        "&version=1.1.1"
-        "&request=GetMap"
-        "&layers=conus_bref_qcd"
-        "&styles="
-        "&format=image/png"
-        "&transparent=true"
-        "&srs=EPSG:3857"
-        "&bbox={bbox-epsg-3857}"
-        "&width=256"
-        "&height=256"
-        "&tiled=true"
     )
 
     return {
-        "tile_url": tile_url,
+        "wms_url": endpoint,
+        "url": endpoint,
+        "layers": "conus_bref_qcd",
+        "styles": "",
+        "version": "1.1.1",
         "attribution": "Radar: NOAA/NWS MRMS",
     }
