@@ -10,9 +10,8 @@ st.set_page_config(page_title="Hull Wet Weather Operations",page_icon="🌊",lay
 
 from components.style import inject_css
 from components.header import render_header
-from config.assets import ASSETS
 from config.theme import NAVY,BLUE,GREEN,LIME,AMBER,RED,MUTED_BLUE
-from services.data_loader import load_collection,load_influent,load_process_summary,load_station_runtimes,latest_snapshot
+from services.data_loader import load_collection,load_influent,load_process_summary,load_station_runtimes,latest_snapshot,load_asset_locations
 from services.weather import historical_precip,nws_bundle
 from services.tides import tide_predictions,historical_tides
 from services.marine import marine_forecast
@@ -26,32 +25,34 @@ with st.spinner("Loading 2026 operating data..."):
     rain=historical_precip(min_date,max_date)
     ranked,significant=rank_events(process,runtimes,rain)
 
-latest_storm = significant.iloc[0].date if not significant.empty else pd.Timestamp(max_date)
+latest_storm = significant.iloc[0].event_date if not significant.empty else pd.Timestamp(max_date)
 mode=st.sidebar.radio("Operating view",["Latest significant storm","Latest available data","Custom date"],index=0)
 if mode=="Latest significant storm": selected_day=pd.Timestamp(latest_storm)
 elif mode=="Latest available data": selected_day=pd.Timestamp(max_date)
 else: selected_day=pd.Timestamp(st.sidebar.date_input("Date",value=latest_storm,min_value=min_date,max_value=max_date))
 window=st.sidebar.select_slider("Playback window",options=[6,12,24,48,72],value=24,format_func=lambda x:f"{x} hours")
-as_of=selected_day+pd.Timedelta(hours=23,minutes=59)
-render_header(f"Historical Playback · {selected_day:%b %d, %Y}")
+event_row = ranked[ranked.event_date.dt.normalize()==selected_day.normalize()]
+response_day = pd.Timestamp(event_row.iloc[0].response_date) if not event_row.empty and pd.notna(event_row.iloc[0].response_date) else selected_day
+as_of=response_day+pd.Timedelta(hours=23,minutes=59)
+render_header(f"Historical Playback · Rain {selected_day:%b %d} → Response {response_day:%b %d, %Y}")
 
-row=ranked[ranked.date.dt.normalize()==selected_day.normalize()]
+row=ranked[ranked.event_date.dt.normalize()==selected_day.normalize()]
 row=row.iloc[0] if not row.empty else pd.Series(dtype=float)
-rain_val=row.get("rain_in",np.nan); plant_flow=row.get("plant_flow_mgd",np.nan); storm_score=row.get("storm_score",np.nan)
+rain_val=row.get("rain_in",np.nan); plant_flow=row.get("plant_peak_mgd",np.nan); storm_score=row.get("storm_score",np.nan); response_lag=row.get("response_lag_hr",np.nan)
 snap=latest_snapshot(collection,as_of)
 max_level=snap.level_in.max() if not snap.empty else np.nan
 running=int((snap.get("pump1_status",0).fillna(0)+snap.get("pump2_status",0).fillna(0)>0).sum()) if not snap.empty else 0
 severity="ALARM" if storm_score>=.8 else "ELEVATED" if storm_score>=.55 else "WATCH" if storm_score>=.3 else "NORMAL"
 sev_color={"NORMAL":GREEN,"WATCH":LIME,"ELEVATED":AMBER,"ALARM":RED}[severity]
-st.markdown(f'<div class="status-strip" style="border-left-color:{sev_color}"><b style="color:{NAVY}">{severity} WET WEATHER STATUS</b> &nbsp; Storm response score {fmt(storm_score*100,0,"%")} · {fmt(rain_val,2," in")} rainfall · {running}/7 sanitary stations operating at playback time</div>',unsafe_allow_html=True)
+st.markdown(f'<div class="status-strip" style="border-left-color:{sev_color}"><b style="color:{NAVY}">{severity} WET WEATHER STATUS</b> &nbsp; Storm response score {fmt(storm_score*100,0,"%")} · {fmt(rain_val,2," in")} rainfall · plant response peak +{fmt(response_lag,0," hr")} · {running}/7 sanitary stations operating at playback time</div>',unsafe_allow_html=True)
 
 kpis=st.columns(6)
-items=[("Rainfall",fmt(rain_val,2,' in'),"Event-day total"),("Plant influent",fmt(plant_flow,2,' MGD'),"Daily total"),("Highest wet well",fmt(max_level,1,' in'),"Across stations"),("Stations running",f"{running} / 7","At playback time"),("System runtime",fmt(row.get('total_runtime_hr',np.nan),1,' hr'),"Daily combined"),("Storm score",fmt(storm_score*100,0,'%'),"Rain + hydraulic response")]
+items=[("Rainfall trigger",fmt(rain_val,2,' in'),"Event-day total"),("Peak plant influent",fmt(plant_flow,2,' MGD'),"Trigger day + next 24 hr"),("Highest wet well",fmt(max_level,1,' in'),"Across stations"),("Stations running",f"{running} / 7","At playback time"),("System runtime",fmt(row.get('total_runtime_48h',np.nan),1,' hr'),"Daily combined"),("Storm score",fmt(storm_score*100,0,'%'),"Rain + hydraulic response")]
 for c,(lab,val,sub) in zip(kpis,items): c.markdown(f'<div class="kpi"><div class="kpi-label">{lab}</div><div class="kpi-value">{val}</div><div class="kpi-sub">{sub}</div></div>',unsafe_allow_html=True)
 
 left,right=st.columns([2.25,1],gap="medium")
 with left:
-    assets=pd.DataFrame(ASSETS)
+    assets=load_asset_locations()
     if not snap.empty:
         assets=assets.merge(snap[[c for c in ["asset_id","flow_gpm","level_in","pump1_status","pump2_status","interceptor_level"] if c in snap]],on="asset_id",how="left")
     else:
@@ -59,11 +60,11 @@ with left:
     assets["utilization"]=(assets.level_in/84).clip(0,1.2)
     assets["status"]=assets.utilization.apply(status_from_utilization)
     assets.loc[assets.asset_type=="Treatment Plant","status"]="Plant"
-    assets.loc[assets.asset_type=="Stormwater","status"]="Stormwater"
-    colors={"Normal":GREEN,"Watch":LIME,"Warning":AMBER,"Alarm":RED,"No Data":"#98A5B3","Plant":NAVY,"Stormwater":BLUE}
+    assets.loc[assets.asset_type=="Unclassified Pump Station","status"]="Unclassified"
+    colors={"Normal":GREEN,"Watch":LIME,"Warning":AMBER,"Alarm":RED,"No Data":"#98A5B3","Plant":NAVY,"Unclassified":BLUE}
     assets["marker_color"]=assets.status.map(colors)
     assets["hover"]="<b>"+assets.display_name+"</b><br>"+assets.address+"<br>Flow: "+assets.flow_gpm.fillna(0).round(0).astype(int).astype(str)+" gpm<br>Wet well: "+assets.level_in.round(1).astype(str)+" in<br>Status: "+assets.status
-    fig=px.scatter_map(assets,lat="lat",lon="lon",color="status",color_discrete_map=colors,size=assets.asset_type.map({"Treatment Plant":26,"Stormwater":18,"Pump Station":16}),hover_name="display_name",hover_data={"address":True,"flow_gpm":':.0f',"level_in":':.1f',"lat":False,"lon":False,"status":False},zoom=11.4,height=570)
+    fig=px.scatter_map(assets,lat="lat",lon="lon",color="status",color_discrete_map=colors,size=assets.asset_type.map({"Treatment Plant":26,"Unclassified Pump Station":18,"Sanitary Pump Station":16}),hover_name="display_name",hover_data={"address":True,"flow_gpm":':.0f',"level_in":':.1f',"lat":False,"lon":False,"status":False},zoom=11.4,height=570)
     fig.update_layout(map_style="open-street-map",margin=dict(l=0,r=0,t=0,b=0),legend=dict(orientation="h",y=1.01,x=.01,bgcolor="rgba(255,255,255,.8)"),clickmode="event+select")
     event=st.plotly_chart(fig,use_container_width=True,on_select="rerun",selection_mode="points",key="system_map")
     selected_asset=st.session_state.get("selected_asset","PS 3")
@@ -83,12 +84,12 @@ with right:
     st.page_link("pages/1_Pump_Station_Detail.py",label="Open dedicated asset page →",icon="🔎",use_container_width=True)
     st.markdown("#### What needs attention")
     alerts=[]
-    for _,x in assets[assets.asset_type=="Pump Station"].sort_values("utilization",ascending=False).head(4).iterrows():
+    for _,x in assets[assets.asset_type=="Sanitary Pump Station"].sort_values("utilization",ascending=False).head(4).iterrows():
         alerts.append(f"**{x.asset_id}** · {x.status} · {fmt(x.level_in,1,' in')} wet well")
     st.info("\n\n".join(alerts) if alerts else "No station data available")
 
 st.markdown("### Coordinated storm response")
-start=as_of-pd.Timedelta(hours=window)
+start=min(selected_day, as_of-pd.Timedelta(hours=window))
 c=collection[(collection.timestamp>=start)&(collection.timestamp<=as_of)].groupby("timestamp",as_index=False).agg(collection_flow_gpm=("flow_gpm","sum"),max_wetwell_in=("level_in","max"))
 i=influent[(influent.timestamp>=start)&(influent.timestamp<=as_of)][["timestamp","influent_total_mgd"]]
 t=historical_tides(start.date(),as_of.date()+timedelta(days=1))
