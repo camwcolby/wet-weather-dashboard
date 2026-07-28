@@ -67,22 +67,40 @@ def load_influent():
 
 @st.cache_data(show_spinner=False)
 def load_process_summary():
-    path=RAW/"Process Summary 2026.xlsx"; xl=pd.ExcelFile(path); frames=[]
-    for sheet in [s for s in xl.sheet_names if s!="Template"]:
-        raw=pd.read_excel(path,sheet_name=sheet,header=None)
-        if len(raw)<7: continue
-        labels1=raw.iloc[4].ffill().astype(str)
-        labels2=raw.iloc[5].astype(str)
-        cols=[]
-        for a,b in zip(labels1,labels2):
-            cols.append((a+" "+b).strip().replace("nan ",""))
-        df=raw.iloc[6:].copy(); df.columns=cols
-        df=df.rename(columns={cols[0]:"date"})
-        df["date"]=_excel_datetime(df["date"])
+    path = RAW / "Process Summary 2026.xlsx"
+    xl = pd.ExcelFile(path)
+    frames = []
+
+    for sheet in [s for s in xl.sheet_names if s != "Template"]:
+        raw = pd.read_excel(path, sheet_name=sheet, header=None)
+
+        if len(raw) < 7:
+            continue
+
+        labels1 = raw.iloc[4].ffill()
+        labels2 = raw.iloc[5]
+
+        cols = []
+
+        for a, b in zip(labels1, labels2):
+            part_a = "" if pd.isna(a) else str(a).strip()
+            part_b = "" if pd.isna(b) else str(b).strip()
+            cols.append(f"{part_a} {part_b}".strip())
+
+        df = raw.iloc[6:].copy()
+        df.columns = cols
+
+        df = df.rename(columns={cols[0]: "date"})
+        df["date"] = _excel_datetime(df["date"])
+
         frames.append(df)
-    out=pd.concat(frames,ignore_index=True).dropna(subset=["date"])
+
+    out = pd.concat(frames, ignore_index=True).dropna(subset=["date"])
+
     for c in out.columns:
-        if c!="date": out[c]=pd.to_numeric(out[c],errors="coerce")
+        if c != "date":
+            out[c] = pd.to_numeric(out[c], errors="coerce")
+
     return out.sort_values("date")
 
 @st.cache_data(show_spinner=False)
