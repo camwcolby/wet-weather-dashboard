@@ -1,0 +1,27 @@
+{
+  "name": "Cameron Brand Theme",
+  "dataColors": [
+    "#0D004C",
+    "#008FD5",
+    "#5EB95E",
+    "#AFE327",
+    "#75AABB",
+    "#45484D"
+  ],
+  "background": "#FFFFFF",
+  "foreground": "#111111",
+  "tableAccent": "#008FD5",
+  "visualStyles": {
+    "*": {
+      "*": {
+        "color": [
+          { "solid": { "color": "#111111" } }
+        ],
+        "titleText": [
+          { "color": { "solid": { "color": "#0D004C" } } }
+        ]
+      }
+    }
+  }
+}
+
