@@ -1,0 +1,7 @@
+Required map packages:
+
+folium
+streamlit-folium
+
+Install with:
+python -m pip install folium streamlit-folium
