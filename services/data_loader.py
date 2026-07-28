@@ -224,11 +224,6 @@ def latest_snapshot(
 
     return snapshot.reset_index(drop=True)
 
-...
-def latest_snapshot(...):
-    ...
-    return snapshot
-
 
 # ---------------------------------------------
 # NEW FUNCTION
