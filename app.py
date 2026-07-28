@@ -18,7 +18,7 @@ from models.pump_cycles import count_pump_cycles, station_cycle_summary
 from models.storm_selection import rank_events
 from services.data_loader import (
     load_collection, load_influent, load_process_summary, load_station_runtimes,
-    latest_snapshot, load_asset_locations,
+    load_historical_influent_rain, latest_snapshot, load_asset_locations,
 )
 from services.weather import historical_precip, historical_hourly_precip, nws_bundle
 from services.tides import tide_predictions, historical_tides
@@ -31,10 +31,16 @@ with st.spinner("Loading 2026 operating data..."):
     influent = load_influent()
     process = load_process_summary()
     runtimes = load_station_runtimes()
-    min_date = min(collection.timestamp.min().date(), process.date.min().date())
-    max_date = max(collection.timestamp.max().date(), process.date.max().date(), runtimes.date.max().date())
-    rain = historical_precip(min_date, max_date)
-    ranked, significant = rank_events(process, runtimes, rain)
+    history = load_historical_influent_rain()
+    min_date = max(collection.timestamp.min().date(), history.date.min().date())
+    max_date = min(collection.timestamp.max().date(), history.date.max().date())
+    history_2026 = history[(history.date.dt.date >= min_date) & (history.date.dt.date <= max_date)].copy()
+    rain = history_2026[["date", "rain_in"]].copy()
+    ranked, significant = rank_events(history_2026, runtimes)
+    telemetry_dates = set(collection["timestamp"].dt.normalize().unique())
+    covered = significant[significant["event_date"].isin(telemetry_dates)].copy()
+    if not covered.empty:
+        significant = covered
 
 latest_storm = significant.iloc[0].event_date if not significant.empty else ranked.iloc[0].event_date
 mode = st.sidebar.radio("Operating view", ["Latest significant storm", "Latest available data", "Custom date"], index=0)
@@ -163,12 +169,12 @@ st.markdown("### Coordinated storm response")
 start = event_start
 c = collection[(collection.timestamp >= start) & (collection.timestamp <= event_end)].groupby("timestamp", as_index=False).agg(collection_flow_gpm=("flow_gpm", "sum"), max_wetwell_in=("level_in", "max"))
 i = influent[(influent.timestamp >= start) & (influent.timestamp <= event_end)][["timestamp", "influent_total_mgd"]]
-rh = historical_hourly_precip(start.date(), event_end.date())
+rh = history_2026[(history_2026.date >= start.normalize()) & (history_2026.date <= event_end.normalize())][["date", "rain_in"]].copy()
 t = historical_tides(start.date(), event_end.date() + timedelta(days=1))
 fig = go.Figure()
 fig.add_vline(x=as_of, line_width=2, line_dash="dash", line_color=RED, annotation_text="Playback")
 if not rh.empty:
-    fig.add_trace(go.Bar(x=rh.timestamp, y=rh.actual_precip_in * 1200, name="Rainfall (scaled)", marker_color=MUTED_BLUE, opacity=.35))
+    fig.add_trace(go.Bar(x=rh.date + pd.Timedelta(hours=12), y=rh.rain_in * 1200, name="Daily rainfall (scaled)", marker_color=MUTED_BLUE, opacity=.35))
 fig.add_trace(go.Scatter(x=c.timestamp, y=c.collection_flow_gpm, name="Collection flow", line=dict(color=BLUE, width=2)))
 fig.add_trace(go.Scatter(x=i.timestamp, y=i.influent_total_mgd * 694.444, name="Plant influent (gpm equivalent)", line=dict(color=NAVY, width=2.5)))
 fig.add_trace(go.Scatter(x=c.timestamp, y=c.max_wetwell_in * 35, name="Max wet well (scaled)", line=dict(color=AMBER, width=1.5, dash="dot")))

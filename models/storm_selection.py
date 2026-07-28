@@ -1,81 +1,78 @@
 from __future__ import annotations
-import pandas as pd
 import numpy as np
+import pandas as pd
 
 
 def _scaled(series: pd.Series) -> pd.Series:
     s = pd.to_numeric(series, errors="coerce")
-    lo, hi = s.quantile(.10), s.quantile(.95)
+    lo, hi = s.quantile(0.10), s.quantile(0.95)
     if pd.isna(lo) or pd.isna(hi) or hi <= lo:
         return pd.Series(0.0, index=s.index)
     return ((s - lo) / (hi - lo)).clip(0, 1)
 
 
-def rank_events(process, runtimes, rain):
-    """Rank trigger dates using rainfall plus the following 48-hour response.
+def rank_events(history: pd.DataFrame, runtimes: pd.DataFrame, _rain_unused=None):
+    """Rank 2026 wet-weather events from local rainfall and delayed response.
 
-    The rainfall day is retained as the event date. Plant and station metrics
-    are searched through the next two days so Hull's delayed peak is captured.
-    When rainfall is unavailable, the engine still ranks hydraulic response and
-    labels rainfall as unavailable rather than inventing it.
+    Each trigger date uses local measured rainfall and searches the following
+    48 hours for the plant peak. Pump runtime and station flow are aggregated
+    across the trigger date plus the next two calendar days.
     """
-    proc = process.copy()
-    proc["date"] = pd.to_datetime(proc["date"]).dt.normalize()
-    inflow_col = next((c for c in proc.columns if c.startswith("Influent All Flows")), None)
-    if inflow_col is None:
-        candidates = [c for c in proc.columns if "Influent" in c and "Total" in c]
-        inflow_col = candidates[0] if candidates else None
-    plant = pd.DataFrame({"date": proc["date"]})
-    plant["plant_flow_mgd"] = pd.to_numeric(proc[inflow_col], errors="coerce") if inflow_col else np.nan
-    plant = plant.groupby("date", as_index=False)["plant_flow_mgd"].max()
+    hist = history.copy()
+    hist["event_date"] = pd.to_datetime(hist["date"], errors="coerce").dt.normalize()
+    hist = hist.dropna(subset=["event_date"]).sort_values("event_date")
+    for col in ["rain_in", "plant_flow_mgd", "plant_peak_mgd"]:
+        hist[col] = pd.to_numeric(hist.get(col), errors="coerce")
 
     rt = runtimes.copy()
-    rt["date"] = pd.to_datetime(rt["date"]).dt.normalize()
-    rt = rt.groupby("date", as_index=False).agg(
-        total_runtime_hr=("total_runtime_hr", "sum"), station_flow_kgal=("flow_kgal", "sum")
-    )
-    start, end = min(plant.date.min(), rt.date.min()), max(plant.date.max(), rt.date.max())
-    daily = pd.DataFrame({"event_date": pd.date_range(start, end, freq="D")})
-
-    if rain is not None and not rain.empty:
-        rd = rain.copy(); rd["event_date"] = pd.to_datetime(rd["date"]).dt.normalize()
-        rd = rd.groupby("event_date", as_index=False)["rain_in"].sum()
-        daily = daily.merge(rd, on="event_date", how="left")
+    if rt is None or rt.empty:
+        rt_daily = pd.DataFrame(columns=["date", "total_runtime_hr", "station_flow_kgal"])
     else:
-        daily["rain_in"] = np.nan
+        rt["date"] = pd.to_datetime(rt["date"], errors="coerce").dt.normalize()
+        rt_daily = rt.groupby("date", as_index=False).agg(
+            total_runtime_hr=("total_runtime_hr", "sum"),
+            station_flow_kgal=("flow_kgal", "sum"),
+        )
+    runtime_idx = rt_daily.set_index("date")["total_runtime_hr"] if not rt_daily.empty else pd.Series(dtype=float)
+    flow_idx = rt_daily.set_index("date")["station_flow_kgal"] if not rt_daily.empty else pd.Series(dtype=float)
+    peak_idx = hist.set_index("event_date")["plant_peak_mgd"]
 
-    plant_idx = plant.set_index("date")["plant_flow_mgd"]
-    runtime_idx = rt.set_index("date")["total_runtime_hr"]
-    flow_idx = rt.set_index("date")["station_flow_kgal"]
     rows = []
-    for d in daily.event_date:
+    for _, base in hist.iterrows():
+        d = base["event_date"]
         response_dates = pd.date_range(d, d + pd.Timedelta(days=2), freq="D")
-        flows = plant_idx.reindex(response_dates)
-        response_date = flows.idxmax() if flows.notna().any() else d
+        peaks = peak_idx.reindex(response_dates)
+        response_date = peaks.idxmax() if peaks.notna().any() else d
         rows.append({
-            "event_date": d, "response_date": response_date,
+            "event_date": d,
+            "response_date": response_date,
             "response_lag_hr": (response_date - d).total_seconds() / 3600,
-            "plant_peak_mgd": flows.max(),
+            "rain_in": base.get("rain_in", np.nan),
+            "plant_flow_mgd": base.get("plant_flow_mgd", np.nan),
+            "plant_peak_mgd": peaks.max(),
             "total_runtime_72h": runtime_idx.reindex(response_dates).sum(min_count=1),
             "station_flow_72h_kgal": flow_idx.reindex(response_dates).sum(min_count=1),
         })
-    daily = daily.merge(pd.DataFrame(rows), on="event_date", how="left")
-    # Backward-compatible name used on the current page.
+    daily = pd.DataFrame(rows)
     daily["total_runtime_48h"] = daily["total_runtime_72h"]
-
-    daily["rain_score"] = _scaled(daily.rain_in)
-    daily["plant_score"] = _scaled(daily.plant_peak_mgd)
-    daily["runtime_score"] = _scaled(daily.total_runtime_72h)
-    daily["station_flow_score"] = _scaled(daily.station_flow_72h_kgal)
-    rainfall_available = daily.rain_in.notna().any()
-    weights = (0.35, 0.35, 0.18, 0.12) if rainfall_available else (0.0, 0.50, 0.30, 0.20)
+    daily["rain_score"] = _scaled(daily["rain_in"])
+    daily["plant_score"] = _scaled(daily["plant_peak_mgd"])
+    daily["runtime_score"] = _scaled(daily["total_runtime_72h"])
+    daily["station_flow_score"] = _scaled(daily["station_flow_72h_kgal"])
     daily["storm_score"] = (
-        weights[0] * daily.rain_score.fillna(0) + weights[1] * daily.plant_score.fillna(0)
-        + weights[2] * daily.runtime_score.fillna(0) + weights[3] * daily.station_flow_score.fillna(0)
+        0.38 * daily["rain_score"].fillna(0)
+        + 0.34 * daily["plant_score"].fillna(0)
+        + 0.18 * daily["runtime_score"].fillna(0)
+        + 0.10 * daily["station_flow_score"].fillna(0)
     )
-    daily["rainfall_available"] = rainfall_available
+    daily["rainfall_available"] = True
 
-    candidates = daily[daily.rain_in.fillna(0) >= 0.10] if rainfall_available else daily
-    if candidates.empty: candidates = daily
-    significant = candidates[candidates.storm_score >= candidates.storm_score.quantile(.65)]
-    return daily.sort_values("storm_score", ascending=False), significant.sort_values("event_date", ascending=False)
+    candidates = daily[daily["rain_in"].fillna(0) >= 0.10].copy()
+    # Prevent adjacent rainy dates from appearing as separate storms. Keep the
+    # highest-scoring trigger within a rolling 72-hour cluster.
+    selected = []
+    for _, row in candidates.sort_values("storm_score", ascending=False).iterrows():
+        if all(abs((row.event_date - existing).days) > 2 for existing in selected):
+            selected.append(row.event_date)
+    significant = candidates[candidates.event_date.isin(selected)].sort_values("event_date", ascending=False)
+    return daily.sort_values("storm_score", ascending=False), significant

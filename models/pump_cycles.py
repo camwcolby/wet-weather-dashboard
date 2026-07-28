@@ -97,3 +97,33 @@ def station_cycle_summary(cycles: pd.DataFrame) -> pd.DataFrame:
         )
         .sort_values("starts", ascending=False)
     )
+
+
+def daily_pump_starts(collection: pd.DataFrame) -> pd.DataFrame:
+    """Count 0→1 transitions by station, pump, and calendar day.
+
+    The prior status is computed before daily grouping, so a pump that turns on
+    just after midnight is counted correctly when the previous sample was off.
+    """
+    if collection is None or collection.empty:
+        return pd.DataFrame(columns=["date", "asset_id", "pump", "starts"])
+    df = collection.copy()
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    df = df.dropna(subset=["timestamp", "asset_id"]).sort_values(["asset_id", "timestamp"])
+    frames = []
+    for pump_number, col in [(1, "pump1_status"), (2, "pump2_status")]:
+        if col not in df.columns:
+            continue
+        part = df[["timestamp", "asset_id", col]].copy()
+        part["state"] = _status_to_binary(part[col])
+        part = part.dropna(subset=["state"])
+        part["previous"] = part.groupby("asset_id")["state"].shift()
+        part["start"] = ((part["previous"] == 0) & (part["state"] == 1)).astype(int)
+        part["date"] = part["timestamp"].dt.normalize()
+        summary = part.groupby(["date", "asset_id"], as_index=False)["start"].sum()
+        summary["pump"] = f"Pump {pump_number}"
+        summary = summary.rename(columns={"start": "starts"})
+        frames.append(summary)
+    if not frames:
+        return pd.DataFrame(columns=["date", "asset_id", "pump", "starts"])
+    return pd.concat(frames, ignore_index=True).sort_values(["date", "asset_id", "pump"])
