@@ -85,30 +85,6 @@ def normalized_dates(frame: pd.DataFrame, column: str) -> set[pd.Timestamp]:
     return set(values.tolist())
 
 
-def score_is_complete(event_row: pd.Series) -> bool:
-    """A composite storm score is displayed only when all four inputs exist."""
-    required = [
-        "rain_in",
-        "plant_peak_mgd",
-        "total_runtime_72h",
-        "station_flow_72h_kgal",
-    ]
-    return all(pd.notna(pd.to_numeric(event_row.get(col), errors="coerce")) for col in required)
-
-
-def score_severity(score: float | int | None, complete: bool) -> tuple[str, str]:
-    """Use one consistent set of score bands across the operator page."""
-    if not complete or pd.isna(score):
-        return "DATA GAP", "#98A5B3"
-    if score >= 0.75:
-        return "ALARM", RED
-    if score >= 0.50:
-        return "ELEVATED", AMBER
-    if score >= 0.30:
-        return "WATCH", LIME
-    return "NORMAL", GREEN
-
-
 def display_value(value, digits: int = 1, suffix: str = "", unavailable: str = "Unavailable") -> str:
     """Format a value without converting missing data into zero."""
     numeric = pd.to_numeric(value, errors="coerce")
@@ -529,10 +505,7 @@ if missing_sources:
 
 rain_val = pd.to_numeric(row.get("rain_in"), errors="coerce")
 plant_flow = pd.to_numeric(row.get("plant_peak_mgd"), errors="coerce")
-raw_storm_score = pd.to_numeric(row.get("storm_score"), errors="coerce")
 response_lag = pd.to_numeric(row.get("response_lag_hr"), errors="coerce")
-score_complete = score_is_complete(row)
-storm_score = raw_storm_score if score_complete else np.nan
 
 # Exact-minute collection snapshot. Empty means genuinely unavailable.
 snap = exact_snapshot(collection, as_of)
@@ -573,14 +546,7 @@ ori_text = (
     else "Incomplete"
 )
 
-severity, sev_color = score_severity(storm_score, score_complete)
 rain_text = display_value(rain_val, 2, " in", "Unavailable")
-score_text = display_value(
-    storm_score * 100 if pd.notna(storm_score) else np.nan,
-    0,
-    "%",
-    "Incomplete",
-)
 lag_text = display_value(response_lag, 0, " hr", "Unavailable")
 
 st.markdown(
@@ -619,8 +585,8 @@ with st.expander("How the Operational Response Index is calculated"):
         """
 The **Operational Response Index (ORI)** is a 0–100 screening indicator of
 how strongly the collection and treatment system is responding at the exact
-playback moment. It is not a permit limit, failure probability, or calibrated
-hydraulic-model result.
+playback moment. It is not a permit limit, failure probability, percent of
+system capacity, or calibrated hydraulic-model result.
 
 The current weighting is:
 
@@ -630,8 +596,23 @@ The current weighting is:
 - **20%** exact-minute plant influent relative to observed conditions
 - **10%** selected-day rainfall relative to the historical daily range
 
+The ORI response bands are:
+
+- **Normal:** below 20
+- **Elevated:** 20 to less than 40
+- **Wet Weather Response:** 40 to less than 60
+- **High System Stress:** 60 to less than 80
+- **Critical Response:** 80 or greater
+
 No nearest timestamp, carry-forward value, or interpolation is used. The
 composite is shown as **Incomplete** when any required component is unavailable.
+
+**Pump-station map status is separate from the ORI.** It currently divides
+wet-well level by a provisional 84-inch reference depth. Station-specific
+operating and alarm elevations should replace that reference when available.
+
+**I/I response factor is also separate from the ORI.** It represents estimated
+excess influent volume divided by rainfall, expressed as MG per inch.
         """
     )
 
@@ -654,47 +635,6 @@ composite is shown as **Incomplete** when any required component is unavailable.
         pd.DataFrame(component_rows),
         hide_index=True,
         use_container_width=True,
-    )
-
-with st.expander("How the dashboard scores are calculated"):
-    st.markdown(
-        """
-**Component scores are relative, not regulatory thresholds.** For rainfall, plant peak flow,
-station runtime, and station flow, the event engine identifies the 10th and 95th percentiles
-across the evaluated daily dataset. Each value is converted to a 0–1 score using:
-
-`component score = (event value − 10th percentile) / (95th percentile − 10th percentile)`
-
-Values below the 10th percentile are clipped to 0; values above the 95th percentile are clipped
-to 1.
-
-**Storm score** is the weighted composite:
-
-- 38% rainfall score
-- 34% plant peak-influent score, using the trigger date and following two days
-- 18% combined station-runtime score over the same three calendar dates
-- 10% combined station-flow score over the same three calendar dates
-
-The displayed storm score is suppressed as **Incomplete** unless all four raw inputs are present.
-The score is intended to rank events within this dataset. It is not a probability of failure,
-percent capacity, compliance risk, or calibrated hydraulic risk.
-
-**Wet-weather status bands** use the composite score consistently:
-
-- Normal: below 30%
-- Watch: 30% to less than 50%
-- Elevated: 50% to less than 75%
-- Alarm: 75% or greater
-
-**Pump-station map status** is separate from the storm score. It currently divides wet-well level
-by a provisional 84-inch reference depth: Normal below 65%, Watch at 65–80%, Warning at 80–95%,
-and Alarm at 95% or greater. This should be replaced with station-specific operating and alarm
-levels when those thresholds are available.
-
-**I/I response factor** is not a score. It is estimated excess influent volume divided by event
-rainfall, expressed as MG per inch. Estimated excess flow is observed influent above a dry-weather
-hour-of-week median baseline, clipped at zero.
-        """
     )
 
 assets = load_asset_locations()
