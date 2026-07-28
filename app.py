@@ -207,6 +207,12 @@ playback_hour = st.sidebar.slider(
 )
 as_of = event_start + pd.Timedelta(hours=playback_hour)
 
+st.session_state["playback_selected_day"] = selected_day
+st.session_state["playback_event_start"] = event_start
+st.session_state["playback_event_end"] = event_end
+st.session_state["playback_as_of"] = as_of
+st.session_state["playback_lookback_hours"] = EVENT_WINDOW_HOURS
+
 response_label = response_day.strftime("%b %d, %Y") if pd.notna(response_day) else "Unavailable"
 render_header(
     f"Historical Playback | Trigger {selected_day:%b %d, %Y} | Response {response_label}"
