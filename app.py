@@ -7,6 +7,10 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import folium
+from streamlit_folium import st_folium
+
+from services.radar import nws_radar_layer
 
 st.set_page_config(
     page_title="Hull Wet Weather Operations",
@@ -39,7 +43,7 @@ from services.marine import marine_forecast
 from services.tides import historical_tides, tide_predictions
 from services.weather import nws_bundle
 from utils.formatting import fmt, status_from_utilization
-from services.radar import latest_radar_frame
+from services.radar import nws_radar_layer
 
 EVENT_WINDOW_HOURS = 72
 WET_WELL_REFERENCE_DEPTH_IN = 84.0
@@ -375,7 +379,7 @@ colors = {
     "Plant": NAVY,
 }
 
-radar_frame = latest_radar_frame()
+radar_layer = nws_radar_layer()
 
 radar_toggle_col, opacity_col, radar_time_col = st.columns([1.2, 1.5, 3.3])
 
@@ -396,84 +400,156 @@ with opacity_col:
         disabled=not show_radar,
     )
 
-with radar_time_col:
-    if radar_frame is not None:
-        radar_timestamp = radar_frame["timestamp"].tz_convert(
-            "America/New_York"
-        )
-        st.caption(
-            "Latest observed radar frame: "
-            f"{radar_timestamp:%b %d, %Y at %I:%M %p %Z}"
-        )
-    else:
-        st.caption("Radar overlay unavailable")
+with radar_status_col:
+    st.markdown(
+        """
+        **🟢 Radar Source:** NOAA/NWS MRMS  
+        Live quality-controlled base reflectivity
+        """
+    )
 
 left, right = st.columns([2.45, 1], gap="medium")
 
 with left:
-    hover_data = {
-        "address": True,
-        "lat": False,
-        "lon": False,
-        "status": False,
+    import folium
+    from streamlit_folium import st_folium
+
+    hull_map = folium.Map(
+        location=[42.286, -70.882],
+        zoom_start=12,
+        tiles=None,
+        control_scale=True,
+    )
+
+    folium.TileLayer(
+        tiles="OpenStreetMap",
+        name="Street map",
+        control=True,
+        show=True,
+    ).add_to(hull_map)
+
+    folium.TileLayer(
+        tiles=(
+            "https://{s}.basemaps.cartocdn.com/light_all/"
+            "{z}/{x}/{y}{r}.png"
+        ),
+        attr="© OpenStreetMap contributors © CARTO",
+        name="Light map",
+        control=True,
+        show=False,
+    ).add_to(hull_map)
+
+    if show_radar:
+        folium.raster_layers.WmsTileLayer(
+            url=radar_layer["wms_url"],
+            layers=radar_layer["layers"],
+            styles=radar_layer.get("styles", ""),
+            fmt="image/png",
+            transparent=True,
+            version="1.1.1",
+            name="NOAA/NWS MRMS radar",
+            attr=radar_layer["attribution"],
+            opacity=radar_opacity,
+            overlay=True,
+            control=True,
+            show=True,
+        ).add_to(hull_map)
+
+    marker_colors = {
+        "Normal": "green",
+        "Watch": "lightgreen",
+        "Warning": "orange",
+        "Alarm": "red",
+        "No Data": "gray",
+        "Plant": "darkblue",
     }
 
-    if "flow_gpm" in assets.columns:
-        hover_data["flow_gpm"] = ":.0f"
-
-    if "level_in" in assets.columns:
-        hover_data["level_in"] = ":.1f"
-
-    fig = px.scatter_map(
-        assets,
-        lat="lat",
-        lon="lon",
-        color="status",
-        color_discrete_map=colors,
-        size=assets["asset_type"].map(
-            {"Treatment Plant": 28, "Pump Station": 18}
-        ).fillna(18),
-        hover_name="display_name",
-        hover_data=hover_data,
-        zoom=12.0,
-        center={"lat": 42.286, "lon": -70.882},
-        height=650,
-    )
-
-    map_layers = []
-
-    if show_radar and radar_frame is not None:
-        map_layers.append(
-            {
-                "sourcetype": "raster",
-                "source": [radar_frame["tile_url"]],
-                "sourceattribution": "Weather radar: RainViewer",
-                "opacity": radar_opacity,
-                "below": "traces",
-            }
+    for _, asset_row in assets.iterrows():
+        latitude = pd.to_numeric(
+            asset_row.get("lat"),
+            errors="coerce",
+        )
+        longitude = pd.to_numeric(
+            asset_row.get("lon"),
+            errors="coerce",
         )
 
-    fig.update_layout(
-        map_style="open-street-map",
-        map_layers=map_layers,
-        margin=dict(l=0, r=0, t=0, b=0),
-        legend=dict(
-            orientation="h",
-            y=1.01,
-            x=0.01,
-            bgcolor="rgba(255,255,255,.86)",
-        ),
-        clickmode="event+select",
-    )
+        if pd.isna(latitude) or pd.isna(longitude):
+            continue
 
-    event = st.plotly_chart(
-        fig,
+        status = asset_row.get("status", "No Data")
+        asset_id = asset_row.get("asset_id", "")
+        display_name = asset_row.get("display_name", asset_id)
+        address = asset_row.get("address", "Address unavailable")
+
+        flow_text = display_value(
+            asset_row.get("flow_gpm"),
+            0,
+            " gpm",
+        )
+        level_text = display_value(
+            asset_row.get("level_in"),
+            1,
+            " in",
+        )
+
+        popup_html = f"""
+        <div style="min-width:220px">
+            <b>{display_name}</b><br>
+            <span>{address}</span><br><br>
+            Status: <b>{status}</b><br>
+            Wet well: <b>{level_text}</b><br>
+            Flow: <b>{flow_text}</b><br>
+            <span style="font-size:11px;color:#667085">
+                Asset ID: {asset_id}
+            </span>
+        </div>
+        """
+
+        folium.CircleMarker(
+            location=[latitude, longitude],
+            radius=10 if asset_row.get("asset_type") == "Treatment Plant" else 7,
+            popup=folium.Popup(
+                popup_html,
+                max_width=300,
+            ),
+            tooltip=display_name,
+            color="white",
+            weight=2,
+            fill=True,
+            fill_color=marker_colors.get(status, "gray"),
+            fill_opacity=0.95,
+        ).add_to(hull_map)
+
+    folium.LayerControl(
+        collapsed=False,
+    ).add_to(hull_map)
+
+    map_event = st_folium(
+        hull_map,
         use_container_width=True,
-        on_select="rerun",
-        selection_mode="points",
+        height=650,
         key="system_map",
+        returned_objects=["last_object_clicked_popup"],
     )
 
+    selected_asset = st.session_state.get(
+        "selected_asset",
+        "PS 3",
+    )
+
+    clicked_popup = (
+        map_event.get("last_object_clicked_popup")
+        if map_event
+        else None
+    )
+
+    if clicked_popup:
+        for asset_id in assets["asset_id"].astype(str):
+            if f"Asset ID: {asset_id}" in clicked_popup:
+                selected_asset = asset_id
+                st.session_state.selected_asset = selected_asset
+                break
     selected_asset = st.session_state.get("selected_asset", "PS 3")
 
     try:
