@@ -400,13 +400,30 @@ with opacity_col:
         disabled=not show_radar,
     )
 
-with radar_status_col:
-    st.markdown(
-        """
-        **🟢 Radar Source:** NOAA/NWS MRMS  
-        Live quality-controlled base reflectivity
-        """
+radar_layer = nws_radar_layer()
+
+radar_toggle_col, opacity_col, radar_status_col = st.columns(
+    [1.2, 1.5, 3.3]
+)
+
+with radar_toggle_col:
+    show_radar = st.toggle(
+        "NWS Radar",
+        value=True,
     )
+
+with opacity_col:
+    radar_opacity = st.slider(
+        "Opacity",
+        min_value=0.10,
+        max_value=0.80,
+        value=0.40,
+        step=0.05,
+        disabled=not show_radar,
+    )
+
+with radar_status_col:
+    st.success("🟢 NOAA/NWS MRMS radar connected")
 
 left, right = st.columns([2.45, 1], gap="medium")
 
