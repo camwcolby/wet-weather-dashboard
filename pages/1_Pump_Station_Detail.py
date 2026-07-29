@@ -18,6 +18,7 @@ from services.data_loader import (
     load_collection,
     load_station_runtimes,
 )
+from services.playback import get_playback
 
 
 inject_css()
@@ -36,45 +37,26 @@ if collection.empty:
 
 
 # ------------------------------------------------------------
-# Read the date and playback selections from app.py
+# Read the exact shared playback state
 # ------------------------------------------------------------
-collection_max = pd.to_datetime(
-    collection["timestamp"],
-    errors="coerce",
-).max()
+playback = get_playback()
 
-fallback_day = collection_max.normalize()
-
-selected_day = pd.Timestamp(
-    st.session_state.get(
-        "playback_selected_day",
-        fallback_day,
+if playback is None:
+    st.warning(
+        "Choose an event and playback hour on the system overview first."
     )
-).normalize()
-
-event_start = pd.Timestamp(
-    st.session_state.get(
-        "playback_event_start",
-        selected_day,
+    st.page_link(
+        "app.py",
+        label="← Return to system overview",
     )
-)
+    st.stop()
 
-event_end = pd.Timestamp(
-    st.session_state.get(
-        "playback_event_end",
-        event_start + pd.Timedelta(hours=72),
-    )
-)
-
-as_of = pd.Timestamp(
-    st.session_state.get(
-        "playback_as_of",
-        event_end,
-    )
-)
-
-# Do not show data beyond the selected playback moment.
-chart_end = min(as_of, event_end)
+selected_day = playback.selected_day
+event_start = playback.event_start
+event_end = playback.event_end
+as_of = playback.as_of
+playback_hour = playback.playback_hour
+chart_end = event_end
 
 
 # ------------------------------------------------------------
@@ -145,7 +127,8 @@ st.caption(
 st.caption(
     f"Playback window: "
     f"**{event_start:%b %d, %Y %I:%M %p}** through "
-    f"**{chart_end:%b %d, %Y %I:%M %p}**"
+    f"**{chart_end:%b %d, %Y %I:%M %p}** "
+    f"({playback_hour} hours)"
 )
 
 
