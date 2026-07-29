@@ -393,6 +393,169 @@ def calculate_operational_response_index(
     }
 
 
+def build_ori_timeline_svg(
+    timeline: pd.DataFrame,
+    current_label: str,
+) -> str:
+    """Return a compact inline SVG for the ORI hover preview."""
+
+    width = 380
+    height = 176
+    left = 38
+    right = 14
+    top = 18
+    bottom = 34
+    plot_width = width - left - right
+    plot_height = height - top - bottom
+
+    clean = timeline.copy()
+    clean["timestamp"] = pd.to_datetime(
+        clean.get("timestamp"),
+        errors="coerce",
+    )
+    clean["ori"] = pd.to_numeric(clean.get("ori"), errors="coerce")
+    clean = clean.dropna(subset=["timestamp", "ori"]).sort_values("timestamp")
+
+    if clean.empty:
+        return (
+            '<div class="ori-tooltip-empty">'
+            'ORI history is unavailable for this playback interval.'
+            '</div>'
+        )
+
+    # Keep the hover chart light even when a live feed contains many readings.
+    if len(clean) > 96:
+        positions = np.linspace(0, len(clean) - 1, 96).round().astype(int)
+        clean = clean.iloc[np.unique(positions)].copy()
+
+    start_time = clean["timestamp"].iloc[0]
+    end_time = clean["timestamp"].iloc[-1]
+    span_seconds = max((end_time - start_time).total_seconds(), 1)
+
+    def x_position(timestamp) -> float:
+        elapsed = (pd.Timestamp(timestamp) - start_time).total_seconds()
+        return left + (elapsed / span_seconds) * plot_width
+
+    def y_position(value) -> float:
+        return top + (1 - np.clip(float(value), 0, 100) / 100) * plot_height
+
+    bands = [
+        (60, 100, "rgba(213,67,67,.08)"),
+        (40, 60, "rgba(239,159,39,.10)"),
+        (0, 40, "rgba(65,170,92,.08)"),
+    ]
+    band_rects = []
+    for low, high, fill in bands:
+        y_top = y_position(high)
+        y_bottom = y_position(low)
+        band_rects.append(
+            f'<rect x="{left}" y="{y_top:.1f}" width="{plot_width}" '
+            f'height="{(y_bottom-y_top):.1f}" fill="{fill}" />'
+        )
+
+    grid = []
+    for tick in (0, 20, 40, 60, 80, 100):
+        y = y_position(tick)
+        grid.append(
+            f'<line x1="{left}" y1="{y:.1f}" x2="{width-right}" y2="{y:.1f}" '
+            'stroke="currentColor" stroke-opacity=".12" stroke-width="1" />'
+        )
+        if tick in (0, 40, 60, 100):
+            grid.append(
+                f'<text x="{left-7}" y="{y+3.5:.1f}" text-anchor="end" '
+                'font-size="9" fill="currentColor" opacity=".62">'
+                f'{tick}</text>'
+            )
+
+    points = " ".join(
+        f'{x_position(row.timestamp):.1f},{y_position(row.ori):.1f}'
+        for row in clean.itertuples(index=False)
+    )
+
+    last = clean.iloc[-1]
+    last_x = x_position(last["timestamp"])
+    last_y = y_position(last["ori"])
+    start_label = start_time.strftime("%-I %p") if hasattr(start_time, 'strftime') else "Start"
+    end_label = end_time.strftime("%-I:%M %p") if hasattr(end_time, 'strftime') else "Current"
+    # Windows-compatible fallback for strftime without %-I.
+    start_label = start_time.strftime("%I %p").lstrip("0")
+    end_label = end_time.strftime("%I:%M %p").lstrip("0")
+
+    return (
+        f'<svg class="ori-mini-chart" viewBox="0 0 {width} {height}" '
+        'role="img" aria-label="Operational Response Index timeline">'
+        + "".join(band_rects)
+        + "".join(grid)
+        + f'<polyline points="{points}" fill="none" stroke="currentColor" '
+          'stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />'
+        + f'<line x1="{last_x:.1f}" y1="{top}" x2="{last_x:.1f}" '
+          f'y2="{height-bottom}" stroke="currentColor" stroke-opacity=".25" '
+          'stroke-dasharray="3 3" />'
+        + f'<circle cx="{last_x:.1f}" cy="{last_y:.1f}" r="4.5" '
+          'fill="white" stroke="currentColor" stroke-width="3" />'
+        + f'<text x="{left}" y="{height-10}" font-size="9" fill="currentColor" '
+          f'opacity=".62">{escape(start_label)}</text>'
+        + f'<text x="{width-right}" y="{height-10}" text-anchor="end" '
+          f'font-size="9" fill="currentColor" opacity=".62">{escape(end_label)}</text>'
+        + f'<text x="{last_x-7:.1f}" y="{max(last_y-9, 12):.1f}" '
+          'text-anchor="end" font-size="10" font-weight="700" '
+          f'fill="currentColor">{last["ori"]:.0f}</text>'
+        + '</svg>'
+        + f'<div class="ori-tooltip-caption">Storm start to {escape(current_label)}</div>'
+    )
+
+
+def build_ori_timeline(
+    collection: pd.DataFrame,
+    influent: pd.DataFrame,
+    assets: pd.DataFrame,
+    event_start: pd.Timestamp,
+    as_of: pd.Timestamp,
+    rain_value,
+    rain_reference: pd.Series,
+) -> pd.DataFrame:
+    """Recalculate the ORI at each available playback timestamp."""
+
+    if collection is None or collection.empty:
+        return pd.DataFrame(columns=["timestamp", "ori"])
+
+    timestamps = pd.to_datetime(
+        collection.get("timestamp"),
+        errors="coerce",
+    ).dropna().dt.floor("min")
+    timestamps = timestamps.loc[
+        timestamps.between(
+            pd.Timestamp(event_start).floor("min"),
+            pd.Timestamp(as_of).floor("min"),
+        )
+    ].drop_duplicates().sort_values()
+
+    if timestamps.empty:
+        return pd.DataFrame(columns=["timestamp", "ori"])
+
+    # Limit repeated calculations while preserving the first and current points.
+    if len(timestamps) > 96:
+        positions = np.linspace(0, len(timestamps) - 1, 96).round().astype(int)
+        timestamps = timestamps.iloc[np.unique(positions)]
+
+    rows = []
+    for timestamp in timestamps:
+        point_snapshot = exact_snapshot(collection, timestamp)
+        point_ori = calculate_operational_response_index(
+            collection=collection,
+            influent=influent,
+            assets=assets,
+            snapshot=point_snapshot,
+            as_of=timestamp,
+            rain_value=rain_value,
+            rain_reference=rain_reference,
+        )
+        if pd.notna(point_ori["value"]):
+            rows.append({"timestamp": timestamp, "ori": point_ori["value"]})
+
+    return pd.DataFrame(rows)
+
+
 inject_css()
 
 with st.spinner("Loading 2026 operating data..."):
@@ -736,6 +899,20 @@ ori = calculate_operational_response_index(
     rain_reference=history_2026["rain_in"],
 )
 
+ori_timeline = build_ori_timeline(
+    collection=collection,
+    influent=influent,
+    assets=assets,
+    event_start=event_start,
+    as_of=as_of,
+    rain_value=rain_val,
+    rain_reference=history_2026["rain_in"],
+)
+ori_timeline_svg = build_ori_timeline_svg(
+    ori_timeline,
+    as_of.strftime("%b %d at %I:%M %p").replace(" 0", " "),
+)
+
 ori_value = ori["value"]
 ori_text = (
     f"{ori_value:.0f}"
@@ -824,11 +1001,21 @@ with overview_cols[2]:
 
 with overview_cols[3]:
     st.markdown(
-        f'<div class="kpi kpi-primary" style="border-color:{ori_card_color};background:{ori_card_background}">'
+        f'<div class="ori-hover-wrap" tabindex="0" '
+        f'aria-label="Operational response. Hover or focus to view timeline.">'
+        f'<div class="kpi kpi-primary ori-hover-card" '
+        f'style="border-color:{ori_card_color};background:{ori_card_background};color:{ori_card_color}">'
         f'<div class="kpi-label">Operational response</div>'
-        f'<div class="kpi-value" style="color:{ori_card_color}">{ori_text}<span class="value-denominator"> / 100</span></div>'
+        f'<div class="kpi-value" style="color:{ori_card_color}">{ori_text}'
+        f'<span class="value-denominator"> / 100</span></div>'
         f'<div class="response-pill" style="color:{ori_card_color};border-color:{ori_card_color}">'
         f'{escape(ori["label"].title())}</div>'
+        f'<div class="hover-hint">Hover for storm timeline</div>'
+        f'</div>'
+        f'<div class="ori-tooltip" style="color:{ori_card_color}">'
+        f'<div class="ori-tooltip-title">Operational response timeline</div>'
+        f'{ori_timeline_svg}'
+        f'</div>'
         f'</div>',
         unsafe_allow_html=True,
     )

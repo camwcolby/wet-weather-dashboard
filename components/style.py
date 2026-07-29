@@ -39,4 +39,17 @@ def inject_css():
     .station-title{font-size:1.15rem;color:#0D004C;font-weight:750}.pill{display:inline-block;padding:4px 9px;border-radius:999px;font-size:.72rem;font-weight:750;background:#EAF7EA;color:#23762C}
     div[data-testid="stMetric"]{background:#fff;border:1px solid #E3E9EF;padding:10px 12px;border-radius:12px}
     .stButton>button,.stLinkButton>a{border-radius:9px;font-weight:650}
+
+    .ori-hover-wrap{position:relative;height:100%;outline:none}
+    .ori-hover-card{position:relative;cursor:help;transition:transform .16s ease,border-color .16s ease}
+    .ori-hover-wrap:hover .ori-hover-card,.ori-hover-wrap:focus .ori-hover-card{transform:translateY(-1px)}
+    .hover-hint{position:absolute;right:14px;bottom:12px;font-size:.64rem;font-weight:700;letter-spacing:.02em;opacity:.58}
+    .ori-tooltip{position:absolute;right:0;bottom:calc(100% + 10px);z-index:1000;width:min(390px,88vw);padding:13px 14px 10px;background:#fff;border:1px solid #DCE4EA;border-radius:13px;box-shadow:0 14px 38px rgba(20,30,55,.18);opacity:0;visibility:hidden;transform:translateY(7px);transition:opacity .16s ease,transform .16s ease,visibility .16s ease;pointer-events:none}
+    .ori-hover-wrap:hover .ori-tooltip,.ori-hover-wrap:focus .ori-tooltip,.ori-hover-wrap:focus-within .ori-tooltip{opacity:1;visibility:visible;transform:translateY(0)}
+    .ori-tooltip:after{content:"";position:absolute;right:28px;top:100%;border:8px solid transparent;border-top-color:#fff}
+    .ori-tooltip-title{font-size:.75rem;color:#0D004C;font-weight:780;margin-bottom:3px}
+    .ori-mini-chart{display:block;width:100%;height:auto;overflow:visible}
+    .ori-tooltip-caption{font-size:.67rem;color:#73808c;text-align:center;margin-top:-4px}
+    .ori-tooltip-empty{font-size:.72rem;color:#73808c;padding:18px 4px}
+    @media (max-width:800px){.hover-hint{display:none}.ori-tooltip{display:none}}
     </style>""",unsafe_allow_html=True)
