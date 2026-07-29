@@ -746,12 +746,12 @@ ori_text = (
 rain_text = display_value(rain_val, 2, " in", "Unavailable")
 
 st.markdown(
-    f'<div class="status-strip" style="border-left-color:{ori["color"]}">'
-    f'<b style="color:{NAVY}">{ori["label"]}</b>'
-    f' &nbsp; Operational Response Index {ori_text} / 100 | '
-    f'Rainfall {rain_text} | Plant response {escape(response_primary)} | '
-    f'Estimated peak {escape(estimated_peak_flow_text)} | '
-    f'Stations running {running_text}</div>',
+    f'<div class="section-intro">'
+    f'<div><div class="section-kicker">Current system snapshot</div>'
+    f'<div class="section-note">Exact-minute operating conditions and storm outlook</div></div>'
+    f'<div class="status-badge" style="color:{ori["color"]};border-color:{ori["color"]};">'
+    f'{escape(ori["label"].title())} · ORI {ori_text}</div>'
+    f'</div>',
     unsafe_allow_html=True,
 )
 
@@ -769,26 +769,39 @@ else:
     ori_card_color = RED
     ori_card_background = "#FEF0F0"
 
-overview_cols = st.columns([1.1, 1.1, 1.1, 1.0])
+overview_cols = st.columns(4, gap="medium")
 
 with overview_cols[0]:
     st.markdown(
-        f'<div class="kpi" style="min-height:172px">'
+        f'<div class="kpi kpi-primary">'
         f'<div class="kpi-label">Pump stations</div>'
-        f'<div class="kpi-value">{running_text}</div>'
-        f'<div class="kpi-sub"><b>ON:</b> {escape(pump_on_text)}<br>'
-        f'<b>OFF:</b> {escape(pump_off_text)}</div>'
+        f'<div class="split-count">'
+        f'<div><span class="count-number">{running}</span><span class="count-label">ON</span></div>'
+        f'<div class="count-divider"></div>'
+        f'<div><span class="count-number">{len(pump_off_names)}</span><span class="count-label">OFF</span></div>'
+        f'</div>'
+        f'<div class="status-list"><span class="status-key">ON</span>{escape(pump_on_text)}</div>'
+        f'<div class="status-list"><span class="status-key">OFF</span>{escape(pump_off_text)}</div>'
         f'</div>',
         unsafe_allow_html=True,
     )
 
 with overview_cols[1]:
+    generator_value = (
+        generator_summary
+        if generator_status_column is not None
+        else "Awaiting SCADA signal"
+    )
+    generator_sub = (
+        generator_detail
+        if generator_status_column is not None
+        else "Generator state will appear automatically when the live feed is connected."
+    )
     st.markdown(
-        f'<div class="kpi" style="min-height:172px">'
+        f'<div class="kpi kpi-primary">'
         f'<div class="kpi-label">Emergency generators</div>'
-        f'<div class="kpi-value" style="font-size:1.25rem">'
-        f'{escape(generator_summary)}</div>'
-        f'<div class="kpi-sub">{generator_detail}</div>'
+        f'<div class="kpi-value kpi-value-compact">{escape(generator_value)}</div>'
+        f'<div class="kpi-sub">{generator_sub}</div>'
         f'</div>',
         unsafe_allow_html=True,
     )
@@ -801,29 +814,28 @@ with overview_cols[2]:
         "Unavailable",
     )
     st.markdown(
-        f'<div class="kpi" style="min-height:172px">'
+        f'<div class="kpi kpi-primary">'
         f'<div class="kpi-label">Highest wet well</div>'
         f'<div class="kpi-value">{highest_level_text}</div>'
-        f'<div class="kpi-sub">{escape(highest_wet_well_station)}</div>'
+        f'<div class="kpi-sub kpi-sub-strong">{escape(highest_wet_well_station)}</div>'
         f'</div>',
         unsafe_allow_html=True,
     )
 
 with overview_cols[3]:
     st.markdown(
-        f'<div class="kpi" style="min-height:172px;'
-        f'border:2px solid {ori_card_color};'
-        f'background:{ori_card_background}">'
+        f'<div class="kpi kpi-primary" style="border-color:{ori_card_color};background:{ori_card_background}">'
         f'<div class="kpi-label">Operational response</div>'
-        f'<div class="kpi-value" style="color:{ori_card_color}">'
-        f'{ori_text} / 100</div>'
-        f'<div class="kpi-sub" style="color:{ori_card_color};font-weight:700">'
+        f'<div class="kpi-value" style="color:{ori_card_color}">{ori_text}<span class="value-denominator"> / 100</span></div>'
+        f'<div class="response-pill" style="color:{ori_card_color};border-color:{ori_card_color}">'
         f'{escape(ori["label"].title())}</div>'
         f'</div>',
         unsafe_allow_html=True,
     )
 
-supporting_kpis = st.columns(4)
+st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+
+supporting_kpis = st.columns(4, gap="medium")
 supporting_items = [
     ("Rainfall trigger", rain_text, "Selected trigger date"),
     ("Plant response", response_primary, response_secondary),
@@ -836,9 +848,9 @@ for column, (label, value, subtitle) in zip(
     supporting_items,
 ):
     column.markdown(
-        f'<div class="kpi" style="min-height:145px">'
+        f'<div class="kpi kpi-secondary">'
         f'<div class="kpi-label">{escape(label)}</div>'
-        f'<div class="kpi-value" style="font-size:1.35rem">{escape(str(value))}</div>'
+        f'<div class="kpi-value kpi-value-secondary">{escape(str(value))}</div>'
         f'<div class="kpi-sub">{escape(str(subtitle))}</div></div>',
         unsafe_allow_html=True,
     )
