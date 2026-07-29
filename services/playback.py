@@ -68,23 +68,6 @@ def _restore_widget_keys() -> None:
         )
 
 
-def save_mode_from_widget() -> None:
-    st.session_state["playback_mode"] = st.session_state[
-        "_playback_mode_widget"
-    ]
-
-
-def save_date_from_widget() -> None:
-    st.session_state["playback_selected_day"] = pd.Timestamp(
-        st.session_state["_custom_date_widget"]
-    ).normalize()
-
-
-def save_hour_from_widget() -> None:
-    st.session_state["playback_hour"] = int(
-        st.session_state["_playback_hour_widget"]
-    )
-
 
 def set_playback(
     *,

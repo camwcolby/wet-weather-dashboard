@@ -45,9 +45,6 @@ from utils.formatting import fmt, status_from_utilization
 from services.radar import nws_radar_layer
 from services.playback import (
     initialize_playback,
-    save_date_from_widget,
-    save_hour_from_widget,
-    save_mode_from_widget,
     set_playback,
 )
 
@@ -454,7 +451,6 @@ mode = st.sidebar.radio(
     "Operating view",
     ["Latest significant storm", "Latest common-data date", "Custom date"],
     key="_playback_mode_widget",
-    on_change=save_mode_from_widget,
 )
 
 if mode == "Latest significant storm":
@@ -472,7 +468,6 @@ else:
             min_value=min_date,
             max_value=max_date,
             key="_custom_date_widget",
-            on_change=save_date_from_widget,
         )
     ).normalize()
 
@@ -502,7 +497,15 @@ saved_hour = max(
     0,
     min(saved_hour, MAX_PLAYBACK_HOURS),
 )
-st.session_state["_playback_hour_widget"] = saved_hour
+
+if "_playback_hour_widget" not in st.session_state:
+    st.session_state["_playback_hour_widget"] = saved_hour
+else:
+    current_widget_hour = int(
+        st.session_state["_playback_hour_widget"]
+    )
+    if current_widget_hour < 0 or current_widget_hour > MAX_PLAYBACK_HOURS:
+        st.session_state["_playback_hour_widget"] = saved_hour
 
 playback_hour = st.sidebar.slider(
     "Storm playback hour",
@@ -510,7 +513,6 @@ playback_hour = st.sidebar.slider(
     max_value=MAX_PLAYBACK_HOURS,
     step=1,
     key="_playback_hour_widget",
-    on_change=save_hour_from_widget,
 )
 
 playback = set_playback(
