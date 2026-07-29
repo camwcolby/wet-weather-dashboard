@@ -29,6 +29,7 @@ from models.ii_estimation import (
 from models.operations_summary import build_operations_summary
 from models.pump_cycles import count_pump_cycles, station_cycle_summary
 from models.storm_selection import rank_events
+from models.plant_response import estimate_plant_response
 from services.data_loader import (
     load_asset_locations,
     load_collection,
@@ -480,22 +481,6 @@ row = (
     else pd.Series(dtype="object")
 )
 
-st.write(
-    {
-        "Selected Day": selected_day,
-        "Response Lag": row.get("response_lag_hr"),
-        "Response Date": row.get("response_date"),
-        "Rain": row.get("rain_in"),
-    }
-)
-
-response_value = row.get("response_date", pd.NaT)
-response_day = (
-    pd.Timestamp(response_value).normalize()
-    if pd.notna(response_value)
-    else pd.NaT
-)
-
 saved_hour = int(
     st.session_state.get(
         "playback_hour",
@@ -535,13 +520,8 @@ event_start = playback.event_start
 event_end = playback.event_end
 as_of = playback.as_of
 
-response_label = (
-    response_day.strftime("%b %d, %Y")
-    if pd.notna(response_day)
-    else "Unavailable"
-)
 render_header(
-    f"Historical Playback | Trigger {selected_day:%b %d, %Y} | Response {response_label}"
+    f"Historical Playback | Trigger {selected_day:%b %d, %Y} | As of {as_of:%b %d, %I:%M %p}"
 )
 
 control_cols = st.columns([1.4, 3.6, 1.0])
@@ -573,8 +553,56 @@ if missing_sources:
     )
 
 rain_val = pd.to_numeric(row.get("rain_in"), errors="coerce")
-plant_flow = pd.to_numeric(row.get("plant_peak_mgd"), errors="coerce")
-response_lag = pd.to_numeric(row.get("response_lag_hr"), errors="coerce")
+
+plant_response = estimate_plant_response(
+    influent=influent,
+    history=history_2026,
+    event_start=event_start,
+    as_of=as_of,
+    event_hours=MAX_PLAYBACK_HOURS,
+)
+
+if plant_response.response_detected:
+    response_primary = f"Detected after {plant_response.response_lag_hr:.1f} hr"
+    response_secondary = (
+        plant_response.response_onset.strftime("Response began %b %d at %I:%M %p")
+        if pd.notna(plant_response.response_onset)
+        else "Sustained plant-flow increase detected"
+    )
+else:
+    response_primary = "Not yet detected"
+    if pd.notna(plant_response.response_threshold_mgd):
+        response_secondary = (
+            f"Watching for sustained flow above "
+            f"{plant_response.response_threshold_mgd:.2f} MGD"
+        )
+    else:
+        response_secondary = "Insufficient influent data at this playback time"
+
+if pd.notna(plant_response.estimated_peak_time):
+    estimated_peak_time_text = plant_response.estimated_peak_time.strftime(
+        "%b %d at %I:%M %p"
+    )
+    if plant_response.estimated_hours_to_peak <= 0.05:
+        peak_time_secondary = "Peak window reached or passed"
+    else:
+        peak_time_secondary = (
+            f"About {plant_response.estimated_hours_to_peak:.1f} hr remaining"
+        )
+else:
+    estimated_peak_time_text = "Unavailable"
+    peak_time_secondary = "Not enough earlier telemetry for an analog estimate"
+
+estimated_peak_flow_text = display_value(
+    plant_response.estimated_peak_flow_mgd,
+    2,
+    " MGD",
+)
+peak_flow_secondary = (
+    f"{plant_response.confidence} confidence | "
+    f"{plant_response.analog_count} prior analog"
+    f"{'s' if plant_response.analog_count != 1 else ''}"
+)
 
 # Asset names are loaded before the operational cards so station IDs can be
 # translated into operator-friendly labels.
@@ -716,13 +744,13 @@ ori_text = (
 )
 
 rain_text = display_value(rain_val, 2, " in", "Unavailable")
-lag_text = display_value(response_lag, 0, " hr", "Unavailable")
 
 st.markdown(
     f'<div class="status-strip" style="border-left-color:{ori["color"]}">'
     f'<b style="color:{NAVY}">{ori["label"]}</b>'
     f' &nbsp; Operational Response Index {ori_text} / 100 | '
-    f'Rainfall {rain_text} | Plant response lag {lag_text} | '
+    f'Rainfall {rain_text} | Plant response {escape(response_primary)} | '
+    f'Estimated peak {escape(estimated_peak_flow_text)} | '
     f'Stations running {running_text}</div>',
     unsafe_allow_html=True,
 )
@@ -795,19 +823,12 @@ with overview_cols[3]:
         unsafe_allow_html=True,
     )
 
-supporting_kpis = st.columns(3)
+supporting_kpis = st.columns(4)
 supporting_items = [
     ("Rainfall trigger", rain_text, "Selected trigger date"),
-    (
-        "Peak plant influent",
-        display_value(plant_flow, 2, " MGD"),
-        "Selected event response",
-    ),
-    (
-        "Plant response lag",
-        lag_text,
-        "Trigger to observed plant response",
-    ),
+    ("Plant response", response_primary, response_secondary),
+    ("Estimated peak time", estimated_peak_time_text, peak_time_secondary),
+    ("Estimated peak flow", estimated_peak_flow_text, peak_flow_secondary),
 ]
 
 for column, (label, value, subtitle) in zip(
@@ -815,9 +836,10 @@ for column, (label, value, subtitle) in zip(
     supporting_items,
 ):
     column.markdown(
-        f'<div class="kpi"><div class="kpi-label">{label}</div>'
-        f'<div class="kpi-value">{value}</div>'
-        f'<div class="kpi-sub">{subtitle}</div></div>',
+        f'<div class="kpi" style="min-height:145px">'
+        f'<div class="kpi-label">{escape(label)}</div>'
+        f'<div class="kpi-value" style="font-size:1.35rem">{escape(str(value))}</div>'
+        f'<div class="kpi-sub">{escape(str(subtitle))}</div></div>',
         unsafe_allow_html=True,
     )
 
