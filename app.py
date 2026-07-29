@@ -480,6 +480,15 @@ row = (
     else pd.Series(dtype="object")
 )
 
+st.write(
+    {
+        "Selected Day": selected_day,
+        "Response Lag": row.get("response_lag_hr"),
+        "Response Date": row.get("response_date"),
+        "Rain": row.get("rain_in"),
+    }
+)
+
 response_value = row.get("response_date", pd.NaT)
 response_day = (
     pd.Timestamp(response_value).normalize()
