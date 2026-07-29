@@ -505,55 +505,251 @@ def build_ori_timeline_svg(
     )
 
 
+@st.cache_data(show_spinner=False, max_entries=24)
+def build_full_ori_timeline(
+    event_start: pd.Timestamp,
+    event_end: pd.Timestamp,
+    rain_value: float,
+    rain_reference_q10: float,
+    rain_reference_q95: float,
+    data_version: str,
+    _collection: pd.DataFrame,
+    _influent: pd.DataFrame,
+) -> pd.DataFrame:
+    """Build one vectorized ORI series for the entire playback event.
+
+    The large DataFrames use leading-underscore arguments so Streamlit does
+    not re-hash every telemetry row on each slider movement. ``data_version``
+    is the explicit cache key that changes when the underlying source grows or
+    its latest timestamp changes. The result is calculated once per event and
+    then sliced to the selected playback time.
+    """
+    del data_version  # Used only as an explicit cache key.
+
+    columns = [
+        "timestamp",
+        "ori",
+        "collection_score",
+        "pumps_score",
+        "wet_well_score",
+        "influent_score",
+        "rain_score",
+    ]
+    if _collection is None or _collection.empty:
+        return pd.DataFrame(columns=columns)
+
+    event_start = pd.Timestamp(event_start).floor("min")
+    event_end = pd.Timestamp(event_end).floor("min")
+
+    collection = _collection.copy()
+    collection["timestamp"] = pd.to_datetime(
+        collection["timestamp"], errors="coerce"
+    ).dt.floor("min")
+    collection = collection.dropna(subset=["timestamp"])
+
+    # --------------------------------------------------------------
+    # Collection-system excess flow and its historical reference
+    # --------------------------------------------------------------
+    flow = collection[["timestamp", "flow_gpm"]].copy()
+    flow["flow_gpm"] = pd.to_numeric(flow["flow_gpm"], errors="coerce")
+    flow = (
+        flow.groupby("timestamp", as_index=False)["flow_gpm"]
+        .sum(min_count=1)
+        .sort_values("timestamp")
+    )
+    flow["hour_of_week"] = (
+        flow["timestamp"].dt.dayofweek * 24 + flow["timestamp"].dt.hour
+    )
+    hourly_baseline = flow.groupby("hour_of_week")["flow_gpm"].median()
+    flow["baseline_gpm"] = flow["hour_of_week"].map(hourly_baseline)
+    flow["excess_gpm"] = (flow["flow_gpm"] - flow["baseline_gpm"]).clip(lower=0)
+
+    def scaled(values: pd.Series, reference: pd.Series) -> pd.Series:
+        numeric_reference = pd.to_numeric(reference, errors="coerce").dropna()
+        if numeric_reference.empty:
+            return pd.Series(np.nan, index=values.index, dtype="float64")
+        lower = numeric_reference.quantile(0.10)
+        upper = numeric_reference.quantile(0.95)
+        if pd.isna(lower) or pd.isna(upper) or upper <= lower:
+            return pd.Series(np.nan, index=values.index, dtype="float64")
+        return ((pd.to_numeric(values, errors="coerce") - lower) / (upper - lower)).clip(0, 1)
+
+    event_flow = flow.loc[
+        flow["timestamp"].between(event_start, event_end),
+        ["timestamp", "excess_gpm"],
+    ].copy()
+    event_flow["collection_score"] = scaled(
+        event_flow["excess_gpm"], flow["excess_gpm"]
+    )
+
+    # --------------------------------------------------------------
+    # Exact-minute pump share and maximum wet-well utilization
+    # --------------------------------------------------------------
+    event_collection = collection.loc[
+        collection["timestamp"].between(event_start, event_end)
+    ].copy()
+
+    pump_columns = [
+        column
+        for column in ("pump1_status", "pump2_status")
+        if column in event_collection.columns
+    ]
+    if pump_columns:
+        pump_long = event_collection[["timestamp", *pump_columns]].melt(
+            id_vars="timestamp", value_vars=pump_columns, value_name="pump_status"
+        )
+        pump_long["pump_status"] = pd.to_numeric(
+            pump_long["pump_status"], errors="coerce"
+        )
+        pump_scores = (
+            pump_long.dropna(subset=["pump_status"])
+            .assign(is_running=lambda frame: (frame["pump_status"] > 0).astype(float))
+            .groupby("timestamp", as_index=False)["is_running"]
+            .mean()
+            .rename(columns={"is_running": "pumps_score"})
+        )
+    else:
+        pump_scores = pd.DataFrame(columns=["timestamp", "pumps_score"])
+
+    if "level_in" in event_collection.columns:
+        level_data = event_collection[["timestamp", "level_in"]].copy()
+        level_data["level_in"] = pd.to_numeric(level_data["level_in"], errors="coerce")
+        wet_well = (
+            level_data.groupby("timestamp", as_index=False)["level_in"]
+            .max()
+            .rename(columns={"level_in": "max_level_in"})
+        )
+        wet_well["wet_well_score"] = (
+            wet_well["max_level_in"] / WET_WELL_REFERENCE_DEPTH_IN
+        ).clip(0, 1)
+    else:
+        wet_well = pd.DataFrame(columns=["timestamp", "wet_well_score"])
+
+    # --------------------------------------------------------------
+    # Exact-minute plant influent and its historical reference
+    # --------------------------------------------------------------
+    if (
+        _influent is not None
+        and not _influent.empty
+        and {"timestamp", "influent_total_mgd"}.issubset(_influent.columns)
+    ):
+        influent = _influent[["timestamp", "influent_total_mgd"]].copy()
+        influent["timestamp"] = pd.to_datetime(
+            influent["timestamp"], errors="coerce"
+        ).dt.floor("min")
+        influent["influent_total_mgd"] = pd.to_numeric(
+            influent["influent_total_mgd"], errors="coerce"
+        )
+        influent = influent.dropna(subset=["timestamp"])
+        influent_reference = influent["influent_total_mgd"]
+        event_influent = (
+            influent.loc[influent["timestamp"].between(event_start, event_end)]
+            .sort_values("timestamp")
+            .drop_duplicates(subset=["timestamp"], keep="last")
+        )
+        event_influent["influent_score"] = scaled(
+            event_influent["influent_total_mgd"], influent_reference
+        )
+        event_influent = event_influent[["timestamp", "influent_score"]]
+    else:
+        event_influent = pd.DataFrame(columns=["timestamp", "influent_score"])
+
+    # --------------------------------------------------------------
+    # Daily rainfall score is constant for the selected event
+    # --------------------------------------------------------------
+    rain_numeric = pd.to_numeric(rain_value, errors="coerce")
+    if (
+        pd.isna(rain_numeric)
+        or pd.isna(rain_reference_q10)
+        or pd.isna(rain_reference_q95)
+        or rain_reference_q95 <= rain_reference_q10
+    ):
+        rain_score = np.nan
+    else:
+        rain_score = float(
+            np.clip(
+                (rain_numeric - rain_reference_q10)
+                / (rain_reference_q95 - rain_reference_q10),
+                0,
+                1,
+            )
+        )
+
+    timeline = event_flow[["timestamp", "collection_score"]].copy()
+    timeline = timeline.merge(pump_scores, on="timestamp", how="left")
+    timeline = timeline.merge(
+        wet_well[["timestamp", "wet_well_score"]], on="timestamp", how="left"
+    )
+    timeline = timeline.merge(event_influent, on="timestamp", how="left")
+    timeline["rain_score"] = rain_score
+
+    component_columns = [
+        "collection_score",
+        "pumps_score",
+        "wet_well_score",
+        "influent_score",
+        "rain_score",
+    ]
+    complete = timeline[component_columns].notna().all(axis=1)
+    timeline["ori"] = np.where(
+        complete,
+        100
+        * (
+            timeline["collection_score"] * 0.30
+            + timeline["pumps_score"] * 0.20
+            + timeline["wet_well_score"] * 0.20
+            + timeline["influent_score"] * 0.20
+            + timeline["rain_score"] * 0.10
+        ),
+        np.nan,
+    )
+    return timeline[columns].sort_values("timestamp").reset_index(drop=True)
+
+
 def build_ori_timeline(
     collection: pd.DataFrame,
     influent: pd.DataFrame,
     assets: pd.DataFrame,
     event_start: pd.Timestamp,
+    event_end: pd.Timestamp,
     as_of: pd.Timestamp,
     rain_value,
     rain_reference: pd.Series,
 ) -> pd.DataFrame:
-    """Recalculate the ORI at each available playback timestamp."""
+    """Return the cached full-event ORI timeline through ``as_of`` only."""
+    del assets  # Retained in the signature for backward compatibility.
 
-    if collection is None or collection.empty:
-        return pd.DataFrame(columns=["timestamp", "ori"])
+    collection_max = pd.to_datetime(
+        collection.get("timestamp"), errors="coerce"
+    ).max() if collection is not None and not collection.empty else pd.NaT
+    influent_max = pd.to_datetime(
+        influent.get("timestamp"), errors="coerce"
+    ).max() if influent is not None and not influent.empty else pd.NaT
+    data_version = (
+        f"c:{len(collection) if collection is not None else 0}:"
+        f"{collection_max}|i:{len(influent) if influent is not None else 0}:"
+        f"{influent_max}"
+    )
 
-    timestamps = pd.to_datetime(
-        collection.get("timestamp"),
-        errors="coerce",
-    ).dropna().dt.floor("min")
-    timestamps = timestamps.loc[
-        timestamps.between(
-            pd.Timestamp(event_start).floor("min"),
-            pd.Timestamp(as_of).floor("min"),
-        )
-    ].drop_duplicates().sort_values()
+    rain_numeric = pd.to_numeric(rain_reference, errors="coerce").dropna()
+    rain_q10 = rain_numeric.quantile(0.10) if not rain_numeric.empty else np.nan
+    rain_q95 = rain_numeric.quantile(0.95) if not rain_numeric.empty else np.nan
 
-    if timestamps.empty:
-        return pd.DataFrame(columns=["timestamp", "ori"])
+    full_timeline = build_full_ori_timeline(
+        event_start=pd.Timestamp(event_start),
+        event_end=pd.Timestamp(event_end),
+        rain_value=float(rain_value) if pd.notna(rain_value) else np.nan,
+        rain_reference_q10=float(rain_q10) if pd.notna(rain_q10) else np.nan,
+        rain_reference_q95=float(rain_q95) if pd.notna(rain_q95) else np.nan,
+        data_version=data_version,
+        _collection=collection,
+        _influent=influent,
+    )
 
-    # Limit repeated calculations while preserving the first and current points.
-    if len(timestamps) > 96:
-        positions = np.linspace(0, len(timestamps) - 1, 96).round().astype(int)
-        timestamps = timestamps.iloc[np.unique(positions)]
-
-    rows = []
-    for timestamp in timestamps:
-        point_snapshot = exact_snapshot(collection, timestamp)
-        point_ori = calculate_operational_response_index(
-            collection=collection,
-            influent=influent,
-            assets=assets,
-            snapshot=point_snapshot,
-            as_of=timestamp,
-            rain_value=rain_value,
-            rain_reference=rain_reference,
-        )
-        if pd.notna(point_ori["value"]):
-            rows.append({"timestamp": timestamp, "ori": point_ori["value"]})
-
-    return pd.DataFrame(rows)
+    cutoff = pd.Timestamp(as_of).floor("min")
+    return full_timeline.loc[
+        pd.to_datetime(full_timeline["timestamp"], errors="coerce") <= cutoff
+    ].copy()
 
 
 inject_css()
@@ -904,6 +1100,7 @@ ori_timeline = build_ori_timeline(
     influent=influent,
     assets=assets,
     event_start=event_start,
+    event_end=event_end,
     as_of=as_of,
     rain_value=rain_val,
     rain_reference=history_2026["rain_in"],
