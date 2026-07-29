@@ -567,26 +567,126 @@ rain_val = pd.to_numeric(row.get("rain_in"), errors="coerce")
 plant_flow = pd.to_numeric(row.get("plant_peak_mgd"), errors="coerce")
 response_lag = pd.to_numeric(row.get("response_lag_hr"), errors="coerce")
 
+# Asset names are loaded before the operational cards so station IDs can be
+# translated into operator-friendly labels.
+assets = load_asset_locations()
+asset_name_lookup = (
+    assets.set_index("asset_id")["display_name"].astype(str).to_dict()
+    if not assets.empty
+    else {}
+)
+
 # Exact-minute collection snapshot. Empty means genuinely unavailable.
 snap = exact_snapshot(collection, as_of)
 telemetry_available = not snap.empty
 
-max_level = (
-    pd.to_numeric(snap.get("level_in"), errors="coerce").max()
-    if telemetry_available and "level_in" in snap.columns
-    else np.nan
+max_level = np.nan
+highest_wet_well_station = "Unavailable"
+
+pump_on_names: list[str] = []
+pump_off_names: list[str] = []
+pump_unknown_names: list[str] = []
+
+generator_on_names: list[str] = []
+generator_off_names: list[str] = []
+generator_unknown_names: list[str] = []
+
+generator_status_candidates = (
+    "generator_status",
+    "emergency_generator_status",
+    "genset_status",
+    "generator_running",
+)
+generator_status_column = next(
+    (
+        column
+        for column in generator_status_candidates
+        if column in snap.columns
+    ),
+    None,
 )
 
 if telemetry_available:
-    pump1 = pd.to_numeric(snap.get("pump1_status"), errors="coerce").fillna(0)
-    pump2 = pd.to_numeric(snap.get("pump2_status"), errors="coerce").fillna(0)
-    running = int(((pump1 + pump2) > 0).sum())
-    reporting_stations = int(snap["asset_id"].nunique())
-    running_text = f"{running} / {reporting_stations}"
+    station_snapshot = snap.copy()
+    station_snapshot["_display_name"] = station_snapshot["asset_id"].map(
+        asset_name_lookup
+    ).fillna(station_snapshot["asset_id"].astype(str))
+
+    if "level_in" in station_snapshot.columns:
+        station_snapshot["_level_numeric"] = pd.to_numeric(
+            station_snapshot["level_in"],
+            errors="coerce",
+        )
+        valid_levels = station_snapshot.dropna(
+            subset=["_level_numeric"]
+        )
+        if not valid_levels.empty:
+            highest_row = valid_levels.sort_values(
+                "_level_numeric",
+                ascending=False,
+            ).iloc[0]
+            max_level = float(highest_row["_level_numeric"])
+            highest_wet_well_station = str(
+                highest_row["_display_name"]
+            )
+
+    for _, station_row in station_snapshot.iterrows():
+        station_name = str(station_row["_display_name"])
+
+        p1 = pd.to_numeric(
+            station_row.get("pump1_status"),
+            errors="coerce",
+        )
+        p2 = pd.to_numeric(
+            station_row.get("pump2_status"),
+            errors="coerce",
+        )
+
+        if pd.isna(p1) and pd.isna(p2):
+            pump_unknown_names.append(station_name)
+        elif (0 if pd.isna(p1) else p1) + (0 if pd.isna(p2) else p2) > 0:
+            pump_on_names.append(station_name)
+        else:
+            pump_off_names.append(station_name)
+
+        if generator_status_column is not None:
+            generator_value = pd.to_numeric(
+                station_row.get(generator_status_column),
+                errors="coerce",
+            )
+            if pd.isna(generator_value):
+                generator_unknown_names.append(station_name)
+            elif generator_value > 0:
+                generator_on_names.append(station_name)
+            else:
+                generator_off_names.append(station_name)
+
+running = len(pump_on_names)
+reporting_stations = len(pump_on_names) + len(pump_off_names)
+running_text = (
+    f"{running} ON / {len(pump_off_names)} OFF"
+    if telemetry_available
+    else "Unavailable"
+)
+
+pump_on_text = ", ".join(pump_on_names) if pump_on_names else "None"
+pump_off_text = ", ".join(pump_off_names) if pump_off_names else "None"
+
+if generator_status_column is None:
+    generator_summary = "Signal not included in prototype data"
+    generator_detail = (
+        "This card will populate when the live SCADA feed provides a "
+        "normalized generator-status field."
+    )
 else:
-    running = np.nan
-    reporting_stations = 0
-    running_text = "Unavailable"
+    generator_summary = (
+        f"{len(generator_on_names)} ON / "
+        f"{len(generator_off_names)} OFF"
+    )
+    generator_detail = (
+        f"ON: {', '.join(generator_on_names) if generator_on_names else 'None'}"
+        f"<br>OFF: {', '.join(generator_off_names) if generator_off_names else 'None'}"
+    )
 
 
 ori = calculate_operational_response_index(
@@ -618,21 +718,93 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-kpis = st.columns(6)
-items = [
+# Three-level operator color treatment for the summary card.
+if pd.isna(ori_value):
+    ori_card_color = "#98A5B3"
+    ori_card_background = "#F3F4F6"
+elif ori_value < 40:
+    ori_card_color = GREEN
+    ori_card_background = "#ECFDF3"
+elif ori_value < 60:
+    ori_card_color = AMBER
+    ori_card_background = "#FFF7E6"
+else:
+    ori_card_color = RED
+    ori_card_background = "#FEF0F0"
+
+overview_cols = st.columns([1.1, 1.1, 1.1, 1.0])
+
+with overview_cols[0]:
+    st.markdown(
+        f'<div class="kpi" style="min-height:172px">'
+        f'<div class="kpi-label">Pump stations</div>'
+        f'<div class="kpi-value">{running_text}</div>'
+        f'<div class="kpi-sub"><b>ON:</b> {escape(pump_on_text)}<br>'
+        f'<b>OFF:</b> {escape(pump_off_text)}</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+with overview_cols[1]:
+    st.markdown(
+        f'<div class="kpi" style="min-height:172px">'
+        f'<div class="kpi-label">Emergency generators</div>'
+        f'<div class="kpi-value" style="font-size:1.25rem">'
+        f'{escape(generator_summary)}</div>'
+        f'<div class="kpi-sub">{generator_detail}</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+with overview_cols[2]:
+    highest_level_text = display_value(
+        max_level,
+        1,
+        " in",
+        "Unavailable",
+    )
+    st.markdown(
+        f'<div class="kpi" style="min-height:172px">'
+        f'<div class="kpi-label">Highest wet well</div>'
+        f'<div class="kpi-value">{highest_level_text}</div>'
+        f'<div class="kpi-sub">{escape(highest_wet_well_station)}</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+with overview_cols[3]:
+    st.markdown(
+        f'<div class="kpi" style="min-height:172px;'
+        f'border:2px solid {ori_card_color};'
+        f'background:{ori_card_background}">'
+        f'<div class="kpi-label">Operational response</div>'
+        f'<div class="kpi-value" style="color:{ori_card_color}">'
+        f'{ori_text} / 100</div>'
+        f'<div class="kpi-sub" style="color:{ori_card_color};font-weight:700">'
+        f'{escape(ori["label"].title())}</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+supporting_kpis = st.columns(3)
+supporting_items = [
     ("Rainfall trigger", rain_text, "Selected trigger date"),
-    ("Peak plant influent", display_value(plant_flow, 2, " MGD"), "Trigger through +48 hr"),
-    ("Highest wet well", display_value(max_level, 1, " in"), "Exact playback minute"),
-    ("Stations running", running_text, "Exact playback minute"),
     (
-        "System runtime",
-        display_value(row.get("total_runtime_72h"), 1, " hr"),
-        "Trigger plus two calendar days",
+        "Peak plant influent",
+        display_value(plant_flow, 2, " MGD"),
+        "Selected event response",
     ),
-    ("Operational response", f"{ori_text} / 100", ori["label"].title()),
+    (
+        "Plant response lag",
+        lag_text,
+        "Trigger to observed plant response",
+    ),
 ]
 
-for column, (label, value, subtitle) in zip(kpis, items):
+for column, (label, value, subtitle) in zip(
+    supporting_kpis,
+    supporting_items,
+):
     column.markdown(
         f'<div class="kpi"><div class="kpi-label">{label}</div>'
         f'<div class="kpi-value">{value}</div>'
@@ -697,7 +869,6 @@ excess influent volume divided by rainfall, expressed as MG per inch.
         use_container_width=True,
     )
 
-assets = load_asset_locations()
 measurement_columns = [
     "flow_gpm",
     "level_in",
