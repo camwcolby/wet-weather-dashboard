@@ -48,6 +48,17 @@ EVENT_WINDOW_HOURS = 72
 WET_WELL_REFERENCE_DEPTH_IN = 84.0
 SANITARY_TELEMETRY_STATIONS = 7
 
+st.markdown(
+    """
+    <style>
+    .leaflet-tile-pane img {
+        image-rendering: auto !important;
+        image-rendering: smooth !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 def exact_snapshot(collection: pd.DataFrame, as_of: pd.Timestamp) -> pd.DataFrame:
     """Return telemetry only for the exact playback minute.
