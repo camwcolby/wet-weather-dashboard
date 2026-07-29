@@ -44,7 +44,7 @@ from services.weather import nws_bundle
 from utils.formatting import fmt, status_from_utilization
 from services.radar import nws_radar_layer
 
-EVENT_WINDOW_HOURS = 72
+MAX_PLAYBACK_HOURS = 72
 WET_WELL_REFERENCE_DEPTH_IN = 84.0
 SANITARY_TELEMETRY_STATIONS = 7
 
@@ -438,27 +438,74 @@ elif common_dates:
 else:
     latest_storm = pd.Timestamp(max_date)
 
+# ------------------------------------------------------------
+# Persistent playback state
+# ------------------------------------------------------------
+DEFAULT_MODE = "Latest significant storm"
+DEFAULT_PLAYBACK_HOUR = 48
+
+
+def _save_playback_mode() -> None:
+    st.session_state["playback_mode"] = st.session_state["_playback_mode_widget"]
+
+
+def _save_custom_date() -> None:
+    st.session_state["playback_selected_day"] = pd.Timestamp(
+        st.session_state["_custom_date_widget"]
+    ).normalize()
+
+
+def _save_playback_hour() -> None:
+    st.session_state["playback_hour"] = int(
+        st.session_state["_playback_hour_widget"]
+    )
+
+
+if "playback_mode" not in st.session_state:
+    st.session_state["playback_mode"] = DEFAULT_MODE
+if "playback_selected_day" not in st.session_state:
+    st.session_state["playback_selected_day"] = pd.Timestamp(latest_storm).normalize()
+if "playback_hour" not in st.session_state:
+    st.session_state["playback_hour"] = DEFAULT_PLAYBACK_HOUR
+
+if "_playback_mode_widget" not in st.session_state:
+    st.session_state["_playback_mode_widget"] = st.session_state["playback_mode"]
+if "_custom_date_widget" not in st.session_state:
+    st.session_state["_custom_date_widget"] = pd.Timestamp(
+        st.session_state["playback_selected_day"]
+    ).date()
+if "_playback_hour_widget" not in st.session_state:
+    st.session_state["_playback_hour_widget"] = int(
+        st.session_state["playback_hour"]
+    )
+
 mode = st.sidebar.radio(
     "Operating view",
     ["Latest significant storm", "Latest common-data date", "Custom date"],
-    index=0,
+    key="_playback_mode_widget",
+    on_change=_save_playback_mode,
 )
 
 if mode == "Latest significant storm":
-    selected_day = latest_storm
+    selected_day = pd.Timestamp(latest_storm).normalize()
 elif mode == "Latest common-data date":
-    selected_day = max(common_dates) if common_dates else pd.Timestamp(max_date)
+    selected_day = pd.Timestamp(
+        max(common_dates) if common_dates else max_date
+    ).normalize()
 else:
     selected_day = pd.Timestamp(
         st.sidebar.date_input(
             "Date",
-            value=latest_storm.date(),
             min_value=min_date,
             max_value=max_date,
+            key="_custom_date_widget",
+            on_change=_save_custom_date,
         )
-    )
+    ).normalize()
 
-selected_day = pd.Timestamp(selected_day).normalize()
+st.session_state["playback_mode"] = mode
+st.session_state["playback_selected_day"] = selected_day
+
 row_match = ranked.loc[ranked["event_date"].dt.normalize() == selected_day]
 row = row_match.iloc[0] if not row_match.empty else pd.Series(dtype="object")
 
@@ -469,19 +516,38 @@ response_day = (
     else pd.NaT
 )
 
-event_start = selected_day
-event_end = event_start + pd.Timedelta(hours=EVENT_WINDOW_HOURS)
+saved_playback_hour = int(st.session_state.get("playback_hour", DEFAULT_PLAYBACK_HOUR))
+saved_playback_hour = max(0, min(saved_playback_hour, MAX_PLAYBACK_HOURS))
+st.session_state["playback_hour"] = saved_playback_hour
+st.session_state["_playback_hour_widget"] = saved_playback_hour
 
 playback_hour = st.sidebar.slider(
     "Storm playback hour",
     min_value=0,
-    max_value=EVENT_WINDOW_HOURS,
-    value=48,
+    max_value=MAX_PLAYBACK_HOURS,
     step=1,
+    key="_playback_hour_widget",
+    on_change=_save_playback_hour,
 )
-as_of = event_start + pd.Timedelta(hours=playback_hour)
 
-response_label = response_day.strftime("%b %d, %Y") if pd.notna(response_day) else "Unavailable"
+playback_hour = int(playback_hour)
+event_start = selected_day
+as_of = event_start + pd.Timedelta(hours=playback_hour)
+event_end = as_of
+event_horizon_end = event_start + pd.Timedelta(hours=MAX_PLAYBACK_HOURS)
+
+st.session_state["playback_hour"] = playback_hour
+st.session_state["playback_window_hours"] = playback_hour
+st.session_state["playback_event_start"] = event_start
+st.session_state["playback_event_end"] = event_end
+st.session_state["playback_horizon_end"] = event_horizon_end
+st.session_state["playback_as_of"] = as_of
+
+response_label = (
+    response_day.strftime("%b %d, %Y")
+    if pd.notna(response_day)
+    else "Unavailable"
+)
 render_header(
     f"Historical Playback | Trigger {selected_day:%b %d, %Y} | Response {response_label}"
 )
