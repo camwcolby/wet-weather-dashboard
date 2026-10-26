@@ -475,11 +475,9 @@ def build_ori_timeline_svg(
     last = clean.iloc[-1]
     last_x = x_position(last["timestamp"])
     last_y = y_position(last["ori"])
-    start_label = start_time.strftime("%-I %p") if hasattr(start_time, 'strftime') else "Start"
-    end_label = end_time.strftime("%-I:%M %p") if hasattr(end_time, 'strftime') else "Current"
-    # Windows-compatible fallback for strftime without %-I.
-    start_label = start_time.strftime("%I %p").lstrip("0")
-    end_label = end_time.strftime("%I:%M %p").lstrip("0")
+    # %-I is Linux/macOS only; %I plus lstrip("0") works on Windows too.
+    start_label = start_time.strftime("%I %p").lstrip("0") if hasattr(start_time, "strftime") else "Start"
+    end_label = end_time.strftime("%I:%M %p").lstrip("0") if hasattr(end_time, "strftime") else "Current"
 
     return (
         f'<svg class="ori-mini-chart" viewBox="0 0 {width} {height}" '
